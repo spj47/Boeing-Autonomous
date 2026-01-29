@@ -1,30 +1,40 @@
 /*
  * Arduino Nano controller for throttle actuation via stepper motor.
- * Receives throttle commands (0-100%) from Raspberry Pi over hardware serial.
+ * Supports MANUAL mode (potentiometer/lever) and AUTO mode (Pi commands).
+ * 
+ * MODES:
+ *   MANUAL (default) - Potentiometer lever controls throttle directly
+ *   AUTO             - Raspberry Pi sends throttle commands via serial
  * 
  * WIRING:
- *   Arduino Pin 3  -> DM556 PUL+ (step signal)
- *   Arduino Pin 4  -> DM556 DIR+ (direction signal)
- *   Arduino Pin 5  -> DM556 ENA+ (enable signal)
- *   Arduino Pin 2  -> Limit switch (to GND when triggered)
- *   Arduino RX0    -> Raspberry Pi TX (for commands)
- *   Arduino TX0    -> Raspberry Pi RX (for responses)
- *   Arduino GND    -> DM556 PUL-, DIR-, ENA-, Pi GND
+ *   Arduino Pin 3   -> DM556 PUL+ (step signal)
+ *   Arduino Pin 4   -> DM556 DIR+ (direction signal)
+ *   Arduino Pin 5   -> DM556 ENA+ (enable signal)
+ *   Arduino Pin 2   -> Limit switch (to GND when triggered)
+ *   Arduino Pin 6   -> Mode switch (to GND = AUTO, open = MANUAL)
+ *   Arduino Pin A0  -> Potentiometer wiper (10k pot between 5V and GND)
+ *   Arduino RX0     -> Raspberry Pi TX (for commands in AUTO mode)
+ *   Arduino TX0     -> Raspberry Pi RX (for responses)
+ *   Arduino GND     -> DM556 PUL-, DIR-, ENA-, Pi GND
  * 
- * COMMANDS (via Serial from Pi):
+ * COMMANDS (via Serial - AUTO mode only):
  *   <0-100>    - Set throttle position (just send the number, e.g., "50")
  *   CAL        - Calibrate (set current position as 0/idle)
  *   STOP       - Emergency stop - immediately halt and disable
  *   STATUS     - Report current system state
+ *   AUTO       - Switch to autonomous mode (Pi control)
+ *   MANUAL     - Switch to manual mode (pot control)
  */
 
-# include <AccelStepper.h>
+#include <AccelStepper.h>
 
 // pin assignments
 const int PIN_STEP   = 3;    // DM556 PUL+ (pulse/step signal)
 const int PIN_DIR    = 4;    // DM556 DIR+ (direction signal)  
 const int PIN_ENABLE = 5;    // DM556 ENA+ (enable signal)
 const int PIN_LIMIT  = 2;    // Limit switch (detects idle position)
+const int PIN_MODE   = 6;    // Mode switch (LOW = AUTO, HIGH = MANUAL)
+const int PIN_POT    = A0;   // Potentiometer for manual throttle control
 
 // motor & driver settings
 // NEMA23 23HS32-4004S: 200 steps/rev (1.8° per step)
@@ -36,6 +46,10 @@ const int STEPS_PER_REV = 200 * MICROSTEPS;  // 1600 steps/rev at 8x microsteppi
 const long THROTTLE_MIN = 0;     // Steps at idle (0%)
 const long THROTTLE_MAX = 800;   // Steps at full throttle (100%)
 
+// potentiometer settings
+const int POT_DEADZONE = 3;      // Ignore changes smaller than this (0-100 scale)
+const int POT_READ_INTERVAL = 50; // Read pot every 50ms to reduce noise
+
 // motion profile
 // Tune these for smooth, responsive throttle actuation
 const float SPEED_MAX = 2000.0;        // Max speed (steps/second)
@@ -46,9 +60,15 @@ const long BAUD_RATE = 9600;   // Must match Pi's serial config
 
 AccelStepper stepper(AccelStepper::DRIVER, PIN_STEP, PIN_DIR);
 
+// operating modes
+enum Mode { MANUAL, AUTO };
+Mode currentMode = MANUAL;    // Start in manual mode for testing
+
 bool isCalibrated = false;    // Has the system been calibrated?
 bool isEnabled = false;       // Is the motor currently enabled?
 int currentThrottle = 0;      // Current throttle percentage (0-100)
+int lastPotThrottle = 0;      // Last pot reading (for deadzone check)
+unsigned long lastPotRead = 0; // Time of last pot reading
 
 void setup() {
     // initialize serial for Pi communication
@@ -67,18 +87,64 @@ void setup() {
     // switch connects pin to GND when triggered (idle position)
     pinMode(PIN_LIMIT, INPUT_PULLUP);
     
-    Serial.println("READY");
+    // configure mode switch with internal pull-up
+    // switch to GND = AUTO mode, open/floating = MANUAL mode
+    pinMode(PIN_MODE, INPUT_PULLUP);
+    
+    // read initial mode from switch
+    currentMode = (digitalRead(PIN_MODE) == LOW) ? AUTO : MANUAL;
+    
+    Serial.print("READY:");
+    Serial.println(currentMode == MANUAL ? "MANUAL" : "AUTO");
 }
 
 // main loop
 void loop() {
+    // check mode switch (physical override)
+    checkModeSwitch();
+    
     // process any incoming serial commands
     processSerial();
+    
+    // in manual mode, read potentiometer
+    if (currentMode == MANUAL) {
+        processManualControl();
+    }
     
     // run stepper (non-blocking - must be called frequently)
     if (isEnabled) {
         stepper.run();
     }
+}
+
+// check physical mode switch
+void checkModeSwitch() {
+    Mode switchMode = (digitalRead(PIN_MODE) == LOW) ? AUTO : MANUAL;
+    
+    // only react to changes
+    if (switchMode != currentMode) {
+        currentMode = switchMode;
+        Serial.print("MODE:");
+        Serial.println(currentMode == MANUAL ? "MANUAL" : "AUTO");
+    }
+}
+
+// read potentiometer and set throttle in manual mode
+void processManualControl() {
+    // rate limit pot reads
+    if (millis() - lastPotRead < POT_READ_INTERVAL) return;
+    lastPotRead = millis();
+    
+    // read pot and convert to 0-100%
+    int rawPot = analogRead(PIN_POT);
+    int potThrottle = map(rawPot, 0, 1023, 0, 100);
+    
+    // apply deadzone to prevent jitter
+    if (abs(potThrottle - lastPotThrottle) < POT_DEADZONE) return;
+    lastPotThrottle = potThrottle;
+    
+    // set throttle (bypasses calibration check in manual mode for testing)
+    setThrottleManual(potThrottle);
 }
 
 // serial command processing
@@ -101,8 +167,16 @@ void processSerial() {
     else if (cmdUpper == "STATUS") {
         sendStatus();
     }
-    // otherwise, treat as throttle value (0-100)
-    else {
+    else if (cmdUpper == "AUTO") {
+        currentMode = AUTO;
+        Serial.println("MODE:AUTO");
+    }
+    else if (cmdUpper == "MANUAL") {
+        currentMode = MANUAL;
+        Serial.println("MODE:MANUAL");
+    }
+    // throttle commands only work in AUTO mode
+    else if (currentMode == AUTO) {
         int percent = cmd.toInt();
         // Validate: toInt() returns 0 for non-numeric, so check if input is actually "0"
         if (percent == 0 && cmd != "0") {
@@ -110,6 +184,10 @@ void processSerial() {
         } else {
             setThrottle(percent);
         }
+    }
+    else {
+        // in manual mode, ignore numeric commands (pot has control)
+        Serial.println("ERR:MANUAL_MODE");
     }
 }
 
@@ -126,8 +204,8 @@ void disableMotor() {
     isEnabled = false;
 }
 
-// set throttle position (0-100%)
-// non-blocking
+// set throttle position (0-100%) - AUTO mode
+// non-blocking, requires calibration
 void setThrottle(int percent) {
     // must be calibrated first
     if (!isCalibrated) {
@@ -148,6 +226,33 @@ void setThrottle(int percent) {
     
     Serial.print("OK:");
     Serial.println(percent);
+}
+
+// set throttle position (0-100%) - MANUAL mode
+// bypasses calibration for testing, auto-calibrates on first use
+void setThrottleManual(int percent) {
+    // auto-calibrate if needed (assumes pot at 0 = idle position)
+    if (!isCalibrated && percent < 5) {
+        stepper.setCurrentPosition(0);
+        isCalibrated = true;
+        Serial.println("AUTO_CAL");
+    }
+    
+    // if still not calibrated, wait for user to move lever to idle
+    if (!isCalibrated) {
+        return;
+    }
+    
+    // clamp to valid range
+    percent = constrain(percent, 0, 100);
+    currentThrottle = percent;
+    
+    // convert percentage to step position
+    long targetSteps = map(percent, 0, 100, THROTTLE_MIN, THROTTLE_MAX);
+    
+    // enable motor and set target (non-blocking)
+    enableMotor();
+    stepper.moveTo(targetSteps);
 }
 
 // calibrate the system
@@ -193,5 +298,7 @@ void sendStatus() {
     Serial.print(",");
     Serial.print(isCalibrated ? "1" : "0");  // calibrated
     Serial.print(",");
-    Serial.println(isAtIdle() ? "1" : "0");  // at idle position
+    Serial.print(isAtIdle() ? "1" : "0");    // at idle position
+    Serial.print(",");
+    Serial.println(currentMode == MANUAL ? "M" : "A");  // mode
 }
