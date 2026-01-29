@@ -18,7 +18,7 @@
  *   STATUS     - Report current system state
  */
 
-#include <AccelStepper.h>
+# include <AccelStepper.h>
 
 // pin assignments
 const int PIN_STEP   = 3;    // DM556 PUL+ (pulse/step signal)
