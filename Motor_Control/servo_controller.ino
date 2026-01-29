@@ -14,11 +14,11 @@ const int STEP_SIZE_US  = 5;
 const int STEP_DELAY_MS = 3;
 
 // State control
-int currentPos    = LOWER_BOUND; // initialize to lower bound
-bool inManualMode = false;
-bool servoMoving = false;
-int targetPos = LOWER_BOUND;
-unsigned long lastStepTime = 0;
+int currentPos             = LOWER_BOUND; // initialize to lower bound
+bool inManualMode          = false;       // True when in manual mode (This stops the driver funciton from getting run when true!!)
+bool servoMoving           = false;       // True when the servo is moving to a targetPos 
+int targetPos              = currentPos;  // Defines where we want the servo to be
+unsigned long lastStepTime = 0;           // Defines the time since the last step of the servo motor
 
 void setup() {
   servo.attach(SERVO_PIN, LOWER_BOUND, HIGHER_BOUND);
