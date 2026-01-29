@@ -1,98 +1,102 @@
-// arduino nano code for throttle stepper control with DM556 driver
+// Arduino Nano code for throttle stepper control with DM556 driver
 
 #include <AccelStepper.h>
 
 // DM556 driver pins
-const int STEP_PIN = 3;
-const int DIR_PIN = 4;
-const int ENABLE_PIN = 5;   // connect to ENA+ if used
+const int STEP_PIN = 3;      // Connect to PUL+ on DM556
+const int DIR_PIN = 4;       // Connect to DIR+ on DM556
+const int ENABLE_PIN = 5;    // Connect to ENA+ on DM556
 
-// KY040 rotary encoder pins
-const int ENCODER_CLK = 2;  // Must be interrupt-capable
-const int ENCODER_DT = 6;
-const int ENCODER_SW = 7; // optional for calibration
+// Throttle limit switch (detects idle position)
+const int THROTTLE_SWITCH_PIN = 2;  // HIGH = throttle at idle, LOW = throttle engaged
+const int CALIBRATE_BTN_PIN = 7;    // Manual calibration button
 
-// adjust these based on your mechanical setup
-const int STEPS_PER_REV = 200;  // NEMA 23 standard (1.8° per step)
-const int MICROSTEPPING = 8;    // Set on DM556 dip switches
-const int STEPS_PER_MICROSTEP_REV = STEPS_PER_REV * MICROSTEPPING;
+// Stepper 23HS32-4004S
+const int STEPS_PER_REV = 200;       // 1.8° per step
+const int MICROSTEPPING = 8;          // Match DM556 DIP switches (SW5=ON, SW6=OFF, SW7=OFF, SW8=ON for 800 pulses/rev)
+const int STEPS_PER_MICROSTEP_REV = STEPS_PER_REV * MICROSTEPPING;  // 1600 steps/rev
 
-// throttle range (in steps from home position)
+// Throttle range (in microsteps from home position)
 const long THROTTLE_MIN_STEPS = 0;
-const long THROTTLE_MAX_STEPS = 800;    // adjust based on your mechanism
+const long THROTTLE_MAX_STEPS = 800;  // ~0.5 rev with 8x microstepping
 
-// speed and acceleration
-const float MAX_SPEED = 2000.0; // steps per second
-const float ACCELERATION = 4000.0;  // steps per second^2
+// Speed and acceleration (tune for smooth throttle response)
+const float MAX_SPEED = 2000.0;       // steps per second
+const float ACCELERATION = 4000.0;   // steps per second^2
 
-// global variables
+// Safety: Communication watchdog timeout (milliseconds)
+const unsigned long WATCHDOG_TIMEOUT = 2000;  // Auto-disable if no command for 2 seconds
+
+// Global variables
 AccelStepper stepper(AccelStepper::DRIVER, STEP_PIN, DIR_PIN);
-
-volatile long encoderPosition = 0;
-volatile int lastEncoderCLK = HIGH;
 
 int targetThrottlePercent = 0;
 bool systemEnabled = false;
 bool isCalibrated = false;
+unsigned long lastCommandTime = 0;
+bool watchdogEnabled = false;  // Disabled by default - enable with WATCHDOG:ON for production
 
-// encoder ISR
-void encoderISR() {
-    int clkState = digitalRead(ENCODER_CLK);
-    if (clkState != lastEncoderCLK && clkState == LOW) {
-        if (digitalRead(ENCODER_DT) != clkState) {
-            encoderPosition++;
-        } else {
-            encoderPosition--;
-        }
-    }
-    lastEncoderCLK = clkState;
-}
-
-// setup
+// Setup
 void setup() {
     Serial.begin(115200);
+    while (!Serial) { ; }  // Wait for serial connection
     
-    // configure stepper
+    // Configure stepper
     stepper.setMaxSpeed(MAX_SPEED);
     stepper.setAcceleration(ACCELERATION);
     stepper.setCurrentPosition(0);
     
-    // configure enable pin
+    // Configure enable pin (DM556: LOW = enabled, HIGH = disabled)
     pinMode(ENABLE_PIN, OUTPUT);
-    digitalWrite(ENABLE_PIN, HIGH);  // HIGH = disabled on most drivers
+    digitalWrite(ENABLE_PIN, HIGH);  // Start disabled for safety
     
-    // configure encoder
-    pinMode(ENCODER_CLK, INPUT_PULLUP);
-    pinMode(ENCODER_DT, INPUT_PULLUP);
-    pinMode(ENCODER_SW, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(ENCODER_CLK), encoderISR, CHANGE);
+    // Configure switches
+    pinMode(THROTTLE_SWITCH_PIN, INPUT_PULLUP);  // Limit switch at idle position
+    pinMode(CALIBRATE_BTN_PIN, INPUT_PULLUP);    // Manual calibration button
     
-    Serial.println("THROTTLE_READY");
+    lastCommandTime = millis();
+    
+    Serial.println("THROTTLE_CONTROLLER_READY");
+    Serial.println("Commands: T:0-100, ENABLE, DISABLE, CALIBRATE, HOME, STATUS, STOP, WATCHDOG:ON/OFF");
 }
 
-// main loop
+// Main loop
 void loop() {
     handleSerial();
+    
+    // auto-disable if no commands received
+    if (watchdogEnabled && systemEnabled && (millis() - lastCommandTime > WATCHDOG_TIMEOUT)) {
+        Serial.println("WATCHDOG:TIMEOUT");
+        emergencyStop();
+    }
     
     if (systemEnabled) {
         stepper.run();
     }
     
-    // Check calibration button
-    if (digitalRead(ENCODER_SW) == LOW) {
-        delay(50);  // Debounce
-        if (digitalRead(ENCODER_SW) == LOW) {
+    // Check calibration button (with debounce)
+    if (digitalRead(CALIBRATE_BTN_PIN) == LOW) {
+        delay(50);
+        if (digitalRead(CALIBRATE_BTN_PIN) == LOW) {
             calibrate();
-            while (digitalRead(ENCODER_SW) == LOW);  // Wait for release
+            while (digitalRead(CALIBRATE_BTN_PIN) == LOW);
         }
     }
 }
 
-// serial command handler
+// Check if throttle is at idle (switch closed)
+bool isThrottleAtIdle() {
+    return digitalRead(THROTTLE_SWITCH_PIN) == HIGH;
+}
+
+// Serial command handler
 void handleSerial() {
     if (Serial.available()) {
         String command = Serial.readStringUntil('\n');
         command.trim();
+        command.toUpperCase();  // Make commands case-insensitive
+        
+        lastCommandTime = millis();  // Reset watchdog timer
         
         if (command.startsWith("T:")) {
             // Throttle command: T:0 to T:100
@@ -117,18 +121,39 @@ void handleSerial() {
         else if (command == "STOP") {
             emergencyStop();
         }
+        else if (command == "PING") {
+            // Heartbeat command - keeps watchdog alive
+            Serial.println("PONG");
+        }
+        else if (command == "WATCHDOG:ON") {
+            watchdogEnabled = true;
+            Serial.println("WATCHDOG:ENABLED");
+        }
+        else if (command == "WATCHDOG:OFF") {
+            watchdogEnabled = false;
+            Serial.println("WATCHDOG:DISABLED");
+        }
+        else {
+            Serial.print("ERR:UNKNOWN_CMD:");
+            Serial.println(command);
+        }
     }
 }
 
-// motor control functions
+// Motor control functions
 void enableMotor() {
-    digitalWrite(ENABLE_PIN, LOW);  // LOW = enabled on most drivers
+    if (!isCalibrated) {
+        Serial.println("ERR:CALIBRATE_FIRST");
+        return;
+    }
+    digitalWrite(ENABLE_PIN, LOW);  // DM556: LOW = enabled
     systemEnabled = true;
+    lastCommandTime = millis();
     Serial.println("OK:ENABLED");
 }
 
 void disableMotor() {
-    digitalWrite(ENABLE_PIN, HIGH);
+    digitalWrite(ENABLE_PIN, HIGH);  // DM556: HIGH = disabled
     systemEnabled = false;
     Serial.println("OK:DISABLED");
 }
@@ -156,12 +181,16 @@ void setThrottlePercent(int percent) {
 void calibrate() {
     Serial.println("CALIBRATING...");
     
-    // reset positions
+    // Disable motor during calibration for manual positioning
+    digitalWrite(ENABLE_PIN, HIGH);
+    
+    // Reset positions - assumes throttle is at idle (0%) position
     stepper.setCurrentPosition(0);
-    encoderPosition = 0;
+    targetThrottlePercent = 0;
     isCalibrated = true;
     
-    Serial.println("CALIBRATED");
+    Serial.println("OK:CALIBRATED");
+    Serial.println("NOTE:Position throttle at IDLE before calibrating");
 }
 
 void homeThrottle() {
@@ -173,20 +202,31 @@ void homeThrottle() {
     Serial.println("HOMING...");
     stepper.moveTo(0);
     
-    // block until home reached
+    // Block until home reached (with timeout)
+    unsigned long homeStart = millis();
     while (stepper.distanceToGo() != 0) {
         stepper.run();
+        if (millis() - homeStart > 5000) {  // 5 second timeout
+            Serial.println("ERR:HOME_TIMEOUT");
+            emergencyStop();
+            return;
+        }
     }
     
     targetThrottlePercent = 0;
-    Serial.println("OK:HOMED");
+    Serial.println("OK:HOME");
 }
 
 void emergencyStop() {
     stepper.stop();
     stepper.setCurrentPosition(stepper.currentPosition());
+    targetThrottlePercent = getCurrentThrottlePercent();
     disableMotor();
-    Serial.println("OK:STOPPED");
+    Serial.println("EMERGENCY_STOP");
+}
+
+int getCurrentThrottlePercent() {
+    return map(stepper.currentPosition(), THROTTLE_MIN_STEPS, THROTTLE_MAX_STEPS, 0, 100);
 }
 
 void sendStatus() {
@@ -197,10 +237,14 @@ void sendStatus() {
     Serial.print(stepper.targetPosition());
     Serial.print(",throttle=");
     Serial.print(targetThrottlePercent);
-    Serial.print(",encoder=");
-    Serial.print(encoderPosition);
+    Serial.print(",actual_throttle=");
+    Serial.print(getCurrentThrottlePercent());
+    Serial.print(",at_idle=");
+    Serial.print(isThrottleAtIdle() ? "1" : "0");
     Serial.print(",enabled=");
     Serial.print(systemEnabled ? "1" : "0");
     Serial.print(",calibrated=");
-    Serial.println(isCalibrated ? "1" : "0");
+    Serial.print(isCalibrated ? "1" : "0");
+    Serial.print(",watchdog=");
+    Serial.println(watchdogEnabled ? "1" : "0");
 }
