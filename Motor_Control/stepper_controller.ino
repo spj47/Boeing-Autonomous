@@ -10,14 +10,13 @@
  *   Arduino Pin 3   -> DM556 PUL+ (step signal)
  *   Arduino Pin 4   -> DM556 DIR+ (direction signal)
  *   Arduino Pin 5   -> DM556 ENA+ (enable signal)
- *   Arduino Pin 2   -> Limit switch (to GND when triggered)
- *   Arduino Pin 6   -> Mode switch (to GND = AUTO, open = MANUAL)
+ *   Arduino Pin 2   -> Limit switch (to GND when triggered) [optional]
  *   Arduino Pin A0  -> Potentiometer wiper (10k pot between 5V and GND)
- *   Arduino RX0     -> Raspberry Pi TX (for commands in AUTO mode)
+ *   Arduino RX0     -> Raspberry Pi TX (for commands)
  *   Arduino TX0     -> Raspberry Pi RX (for responses)
  *   Arduino GND     -> DM556 PUL-, DIR-, ENA-, Pi GND
  * 
- * COMMANDS (via Serial - AUTO mode only):
+ * COMMANDS (via Serial):
  *   <0-100>    - Set throttle position (just send the number, e.g., "50")
  *   CAL        - Calibrate (set current position as 0/idle)
  *   STOP       - Emergency stop - immediately halt and disable
@@ -32,19 +31,21 @@
 const int PIN_STEP   = 3;    // DM556 PUL+ (pulse/step signal)
 const int PIN_DIR    = 4;    // DM556 DIR+ (direction signal)  
 const int PIN_ENABLE = 5;    // DM556 ENA+ (enable signal)
-const int PIN_LIMIT  = 2;    // Limit switch (detects idle position)
-const int PIN_MODE   = 6;    // Mode switch (LOW = AUTO, HIGH = MANUAL)
+const int PIN_LIMIT  = 2;    // Limit switch (detects idle position) [optional]
 const int PIN_POT    = A0;   // Potentiometer for manual throttle control
 
 // motor & driver settings
 // NEMA23 23HS32-4004S: 200 steps/rev (1.8° per step)
 // DM556 microstepping: Set via DIP switches on driver
-const int MICROSTEPS = 8;                    // Match DM556 DIP switch setting
-const int STEPS_PER_REV = 200 * MICROSTEPS;  // 1600 steps/rev at 8x microstepping
+// Your setting: 64x microstepping = 12800 pulses/rev
+const int MICROSTEPS = 64;                   // Matches your DM556 DIP switch setting
+const int STEPS_PER_REV = 200 * MICROSTEPS;  // 12800 steps/rev at 64x microstepping
 
 // throttle range
+// 6400 steps = 180° rotation (half revolution)
+// Adjust THROTTLE_MAX based on how much travel your throttle needs
 const long THROTTLE_MIN = 0;     // Steps at idle (0%)
-const long THROTTLE_MAX = 800;   // Steps at full throttle (100%)
+const long THROTTLE_MAX = 6400;  // Steps at full throttle (100%) = 180° rotation
 
 // potentiometer settings
 const int POT_DEADZONE = 3;      // Ignore changes smaller than this (0-100 scale)
@@ -52,11 +53,15 @@ const int POT_READ_INTERVAL = 50; // Read pot every 50ms to reduce noise
 
 // motion profile
 // Tune these for smooth, responsive throttle actuation
-const float SPEED_MAX = 2000.0;        // Max speed (steps/second)
-const float ACCELERATION = 4000.0;     // Acceleration (steps/second²)
+// Higher values needed for 64x microstepping
+const float SPEED_MAX = 8000.0;        // Max speed (steps/second) ~0.6 rev/sec
+const float ACCELERATION = 16000.0;    // Acceleration (steps/second²)
 
 // serial communication
 const long BAUD_RATE = 9600;   // Must match Pi's serial config
+
+// debug mode - set to false for normal operation
+const bool DEBUG = false;
 
 AccelStepper stepper(AccelStepper::DRIVER, PIN_STEP, PIN_DIR);
 
@@ -87,22 +92,12 @@ void setup() {
     // switch connects pin to GND when triggered (idle position)
     pinMode(PIN_LIMIT, INPUT_PULLUP);
     
-    // configure mode switch with internal pull-up
-    // switch to GND = AUTO mode, open/floating = MANUAL mode
-    pinMode(PIN_MODE, INPUT_PULLUP);
-    
-    // read initial mode from switch
-    currentMode = (digitalRead(PIN_MODE) == LOW) ? AUTO : MANUAL;
-    
     Serial.print("READY:");
     Serial.println(currentMode == MANUAL ? "MANUAL" : "AUTO");
 }
 
 // main loop
 void loop() {
-    // check mode switch (physical override)
-    checkModeSwitch();
-    
     // process any incoming serial commands
     processSerial();
     
@@ -117,18 +112,6 @@ void loop() {
     }
 }
 
-// check physical mode switch
-void checkModeSwitch() {
-    Mode switchMode = (digitalRead(PIN_MODE) == LOW) ? AUTO : MANUAL;
-    
-    // only react to changes
-    if (switchMode != currentMode) {
-        currentMode = switchMode;
-        Serial.print("MODE:");
-        Serial.println(currentMode == MANUAL ? "MANUAL" : "AUTO");
-    }
-}
-
 // read potentiometer and set throttle in manual mode
 void processManualControl() {
     // rate limit pot reads
@@ -138,6 +121,15 @@ void processManualControl() {
     // read pot and convert to 0-100%
     int rawPot = analogRead(PIN_POT);
     int potThrottle = map(rawPot, 0, 1023, 0, 100);
+    
+    // debug output
+    if (DEBUG && (abs(potThrottle - lastPotThrottle) >= POT_DEADZONE)) {
+        Serial.print("POT:");
+        Serial.print(rawPot);
+        Serial.print(" -> ");
+        Serial.print(potThrottle);
+        Serial.println("%");
+    }
     
     // apply deadzone to prevent jitter
     if (abs(potThrottle - lastPotThrottle) < POT_DEADZONE) return;
@@ -166,6 +158,9 @@ void processSerial() {
     }
     else if (cmdUpper == "STATUS") {
         sendStatus();
+    }
+    else if (cmdUpper == "TEST") {
+        testMotor();
     }
     else if (cmdUpper == "AUTO") {
         currentMode = AUTO;
@@ -253,6 +248,45 @@ void setThrottleManual(int percent) {
     // enable motor and set target (non-blocking)
     enableMotor();
     stepper.moveTo(targetSteps);
+    
+    if (DEBUG) {
+        Serial.print("MOVE:");
+        Serial.print(stepper.currentPosition());
+        Serial.print(" -> ");
+        Serial.print(targetSteps);
+        Serial.print(" (enabled=");
+        Serial.print(isEnabled);
+        Serial.println(")");
+    }
+}
+
+// test motor function - sends pulses directly for diagnostics
+void testMotor() {
+    Serial.println("TEST:Sending 12800 pulses (1 full rev at 64x microstepping)...");
+    
+    // Enable the driver
+    digitalWrite(PIN_ENABLE, LOW);
+    delay(100);
+    
+    // Set direction
+    digitalWrite(PIN_DIR, HIGH);
+    
+    // Send 12800 pulses (1 full revolution)
+    for (long i = 0; i < 12800; i++) {
+        digitalWrite(PIN_STEP, HIGH);
+        delayMicroseconds(50);
+        digitalWrite(PIN_STEP, LOW);
+        delayMicroseconds(50);
+        
+        if (i % 3200 == 0 && i > 0) {
+            Serial.print("TEST:");
+            Serial.print((i * 100) / 12800);
+            Serial.println("%");
+        }
+    }
+    
+    Serial.println("TEST:Complete - motor should have made 1 full revolution");
+    Serial.println("TEST:Type STOP to disable motor");
 }
 
 // calibrate the system
