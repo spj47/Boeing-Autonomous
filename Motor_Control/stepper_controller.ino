@@ -44,8 +44,9 @@ const int STEPS_PER_REV = 200 * MICROSTEPS;  // 12800 steps/rev at 64x microstep
 // throttle range
 // 6400 steps = 180° rotation (half revolution)
 // Adjust THROTTLE_MAX based on how much travel your throttle needs
-const long THROTTLE_MIN = 0;     // Steps at idle (0%)
-const long THROTTLE_MAX = 6400;  // Steps at full throttle (100%) = 180° rotation
+// Negative value = counter-clockwise, Positive = clockwise
+const long THROTTLE_MIN = 0;      // Steps at idle (0%)
+const long THROTTLE_MAX = -6400;  // Steps at full throttle (100%) = 180° CCW
 
 // potentiometer settings
 const int POT_DEADZONE = 3;      // Ignore changes smaller than this (0-100 scale)
