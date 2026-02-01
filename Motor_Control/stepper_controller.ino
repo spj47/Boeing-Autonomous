@@ -1,25 +1,34 @@
 /*
  * Arduino Nano controller for throttle actuation via stepper motor.
- * Supports MANUAL mode (potentiometer/lever) and AUTO mode (Pi commands).
- * 
- * MODES:
- *   MANUAL (default) - Potentiometer lever controls throttle directly
- *   AUTO             - Raspberry Pi sends throttle commands via serial
+ * Supports MANUAL mode (potentiometer) and AUTO mode (Pi commands).
  * 
  * WIRING:
  *   Arduino Pin 3   -> DM556 PUL+ (step signal)
  *   Arduino Pin 4   -> DM556 DIR+ (direction signal)
  *   Arduino Pin 5   -> DM556 ENA+ (enable signal)
  *   Arduino Pin 2   -> Limit switch (to GND when triggered) [optional]
- *   Arduino Pin A0  -> Potentiometer wiper (10k pot between 5V and GND)
+ *   Arduino Pin A1  -> Potentiometer wiper (10k pot between 5V and GND)
  *   Arduino RX0     -> Raspberry Pi TX (for commands)
  *   Arduino TX0     -> Raspberry Pi RX (for responses)
  *   Arduino GND     -> DM556 PUL-, DIR-, ENA-, Pi GND
  * 
+ * DM556 CONNECTIONS:
+ *   PUL+  -> Arduino Pin 3
+ *   PUL-  -> Arduino GND
+ *   DIR+  -> Arduino Pin 4  
+ *   DIR-  -> Arduino GND
+ *   ENA+  -> Arduino Pin 5
+ *   ENA-  -> Arduino GND
+ * 
+ * POTENTIOMETER:
+ *   Pin 1 -> GND
+ *   Pin 2 (wiper) -> Arduino A1
+ *   Pin 3 -> 5V
+ * 
  * COMMANDS (via Serial):
- *   <0-100>    - Set throttle position (just send the number, e.g., "50")
+ *   <0-100>    - Set throttle position (AUTO mode only)
  *   CAL        - Calibrate (set current position as 0/idle)
- *   STOP       - Emergency stop - immediately halt and disable
+ *   STOP       - Emergency stop
  *   STATUS     - Report current system state
  *   AUTO       - Switch to autonomous mode (Pi control)
  *   MANUAL     - Switch to manual mode (pot control)
@@ -49,36 +58,41 @@ const long THROTTLE_MIN = 0;      // Steps at idle (0%)
 const long THROTTLE_MAX = -6400;  // Steps at full throttle (100%) = 180° CCW
 
 // potentiometer settings
-const int POT_DEADZONE = 3;      // Ignore changes smaller than this (0-100 scale)
-const int POT_READ_INTERVAL = 50; // Read pot every 50ms to reduce noise
+const int POT_DEADZONE = 5;        // Ignore changes smaller than this (0-100 scale)
+const int POT_READ_INTERVAL = 50;  // Read pot every 50ms
+const int POT_SAMPLES = 5;         // Number of samples for median filter
 
 // motion profile
 // Tune these for smooth, responsive throttle actuation
 // Higher values needed for 64x microstepping
-const float SPEED_MAX = 8000.0;        // Max speed (steps/second) ~0.6 rev/sec
-const float ACCELERATION = 16000.0;    // Acceleration (steps/second²)
+const float SPEED_MAX = 12000.0;       // Max speed (steps/second)
+const float ACCELERATION = 50000.0;    // High acceleration for snappy response
 
 // serial communication
 const long BAUD_RATE = 9600;   // Must match Pi's serial config
 
-// debug mode - set to false for normal operation
-const bool DEBUG = false;
+// Set to false to completely disable pot/manual mode (use AUTO only)
+const bool ENABLE_MANUAL_MODE = true;
 
 AccelStepper stepper(AccelStepper::DRIVER, PIN_STEP, PIN_DIR);
 
 // operating modes
 enum Mode { MANUAL, AUTO };
-Mode currentMode = MANUAL;    // Start in manual mode for testing
+Mode currentMode = MANUAL;    // Start in manual mode
 
 bool isCalibrated = false;    // Has the system been calibrated?
 bool isEnabled = false;       // Is the motor currently enabled?
 int currentThrottle = 0;      // Current throttle percentage (0-100)
 int lastPotThrottle = 0;      // Last pot reading (for deadzone check)
+int stablePotValue = 0;       // Filtered stable pot value
 unsigned long lastPotRead = 0; // Time of last pot reading
 
 void setup() {
     // initialize serial for Pi communication
     Serial.begin(BAUD_RATE);
+    
+    // Use default internal reference (don't touch AREF pin)
+    analogReference(DEFAULT);
     
     // configure stepper motor
     stepper.setMaxSpeed(SPEED_MAX);
@@ -93,6 +107,15 @@ void setup() {
     // switch connects pin to GND when triggered (idle position)
     pinMode(PIN_LIMIT, INPUT_PULLUP);
     
+    // Initialize pot reading to current value (prevents startup drift)
+    if (ENABLE_MANUAL_MODE) {
+        stablePotValue = readPotSmoothed();
+        lastPotThrottle = map(stablePotValue, 0, 1023, 0, 100);
+    }
+    
+    // Auto-calibrate on startup - current position is home (0%)
+    isCalibrated = true;
+    
     Serial.print("READY:");
     Serial.println(currentMode == MANUAL ? "MANUAL" : "AUTO");
 }
@@ -102,8 +125,8 @@ void loop() {
     // process any incoming serial commands
     processSerial();
     
-    // in manual mode, read potentiometer
-    if (currentMode == MANUAL) {
+    // in manual mode, read potentiometer (if enabled)
+    if (ENABLE_MANUAL_MODE && currentMode == MANUAL) {
         processManualControl();
     }
     
@@ -113,24 +136,41 @@ void loop() {
     }
 }
 
+// read potentiometer with median filter to reject noise spikes
+int readPotSmoothed() {
+    int samples[POT_SAMPLES];
+    
+    // Collect samples
+    for (int i = 0; i < POT_SAMPLES; i++) {
+        samples[i] = analogRead(PIN_POT);
+        delayMicroseconds(500);  // Small delay between samples
+    }
+    
+    // Sort samples (simple bubble sort - fine for small arrays)
+    for (int i = 0; i < POT_SAMPLES - 1; i++) {
+        for (int j = 0; j < POT_SAMPLES - i - 1; j++) {
+            if (samples[j] > samples[j + 1]) {
+                int temp = samples[j];
+                samples[j] = samples[j + 1];
+                samples[j + 1] = temp;
+            }
+        }
+    }
+    
+    // Return median (middle value) - rejects outliers/spikes
+    return samples[POT_SAMPLES / 2];
+}
+
 // read potentiometer and set throttle in manual mode
 void processManualControl() {
     // rate limit pot reads
     if (millis() - lastPotRead < POT_READ_INTERVAL) return;
     lastPotRead = millis();
     
-    // read pot and convert to 0-100%
-    int rawPot = analogRead(PIN_POT);
-    int potThrottle = map(rawPot, 0, 1023, 0, 100);
+    // read pot with median filter (no additional smoothing)
+    int rawPot = readPotSmoothed();
     
-    // debug output
-    if (DEBUG && (abs(potThrottle - lastPotThrottle) >= POT_DEADZONE)) {
-        Serial.print("POT:");
-        Serial.print(rawPot);
-        Serial.print(" -> ");
-        Serial.print(potThrottle);
-        Serial.println("%");
-    }
+    int potThrottle = map(rawPot, 0, 1023, 0, 100);
     
     // apply deadzone to prevent jitter
     if (abs(potThrottle - lastPotThrottle) < POT_DEADZONE) return;
@@ -160,16 +200,17 @@ void processSerial() {
     else if (cmdUpper == "STATUS") {
         sendStatus();
     }
-    else if (cmdUpper == "TEST") {
-        testMotor();
-    }
     else if (cmdUpper == "AUTO") {
         currentMode = AUTO;
         Serial.println("MODE:AUTO");
     }
     else if (cmdUpper == "MANUAL") {
-        currentMode = MANUAL;
-        Serial.println("MODE:MANUAL");
+        if (ENABLE_MANUAL_MODE) {
+            currentMode = MANUAL;
+            Serial.println("MODE:MANUAL");
+        } else {
+            Serial.println("ERR:MANUAL_DISABLED");
+        }
     }
     // throttle commands only work in AUTO mode
     else if (currentMode == AUTO) {
@@ -225,18 +266,13 @@ void setThrottle(int percent) {
 }
 
 // set throttle position (0-100%) - MANUAL mode
-// bypasses calibration for testing, auto-calibrates on first use
+// no calibration required - treats current position as relative reference
 void setThrottleManual(int percent) {
-    // auto-calibrate if needed (assumes pot at 0 = idle position)
-    if (!isCalibrated && percent < 5) {
+    // auto-calibrate on first call (wherever the pot is becomes the starting point)
+    if (!isCalibrated) {
         stepper.setCurrentPosition(0);
         isCalibrated = true;
         Serial.println("AUTO_CAL");
-    }
-    
-    // if still not calibrated, wait for user to move lever to idle
-    if (!isCalibrated) {
-        return;
     }
     
     // clamp to valid range
@@ -249,45 +285,6 @@ void setThrottleManual(int percent) {
     // enable motor and set target (non-blocking)
     enableMotor();
     stepper.moveTo(targetSteps);
-    
-    if (DEBUG) {
-        Serial.print("MOVE:");
-        Serial.print(stepper.currentPosition());
-        Serial.print(" -> ");
-        Serial.print(targetSteps);
-        Serial.print(" (enabled=");
-        Serial.print(isEnabled);
-        Serial.println(")");
-    }
-}
-
-// test motor function - sends pulses directly for diagnostics
-void testMotor() {
-    Serial.println("TEST:Sending 12800 pulses (1 full rev at 64x microstepping)...");
-    
-    // Enable the driver
-    digitalWrite(PIN_ENABLE, LOW);
-    delay(100);
-    
-    // Set direction
-    digitalWrite(PIN_DIR, HIGH);
-    
-    // Send 12800 pulses (1 full revolution)
-    for (long i = 0; i < 12800; i++) {
-        digitalWrite(PIN_STEP, HIGH);
-        delayMicroseconds(50);
-        digitalWrite(PIN_STEP, LOW);
-        delayMicroseconds(50);
-        
-        if (i % 3200 == 0 && i > 0) {
-            Serial.print("TEST:");
-            Serial.print((i * 100) / 12800);
-            Serial.println("%");
-        }
-    }
-    
-    Serial.println("TEST:Complete - motor should have made 1 full revolution");
-    Serial.println("TEST:Type STOP to disable motor");
 }
 
 // calibrate the system
