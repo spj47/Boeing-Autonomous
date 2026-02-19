@@ -1,30 +1,34 @@
-import cv2
 from ultralytics import YOLO
-from camera_interface import Webcam 
+from camera_interface import Webcam
 
-def main():
-    model = YOLO("./Sensors/Camera/yolov8n.pt")  
 
-    cam = Webcam()
-    cam.open()
+class YOLODetector:
+    def __init__(self, model_path="./Sensors/Camera/best.pt", rgb=True):
+        self.model = YOLO(model_path)
+        self.cam = Webcam()
+        self.rgb = rgb
+        self.is_open = False
+        self.open()
 
-    print("Press 'q' to quit the live detection feed.")
+    def open(self):
+        if not self.is_open:
+            self.cam.open()
+            self.is_open = True
 
-    try:
-        while True:
-            frame = cam.take_picture(rgb=True)
-            results = model.predict(frame, verbose=False)
+    def close(self):
+        if self.is_open:
+            self.cam.close()
+            self.is_open = False
 
-            annotated_frame = results[0].plot() 
+    def get_frame(self):
+        if not self.is_open:
+            raise RuntimeError("Camera is not open.")
+        return self.cam.take_picture(rgb=self.rgb)
 
-            annotated_frame_bgr = cv2.cvtColor(annotated_frame, cv2.COLOR_RGB2BGR)
-            cv2.imshow("YOLO Object Detection", annotated_frame_bgr)
+    def detect(self):
+        frame = self.get_frame()
+        results = self.model.predict(frame, verbose=False)
+        annotated = results[0].plot()
+        return frame, annotated, results
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
 
-    finally:
-        cam.close()
-
-if __name__ == "__main__":
-    main()
