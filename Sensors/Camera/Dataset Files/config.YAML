@@ -1,6 +1,0 @@
-path: Sensors/Camera/Dataset Files/Dataset
-train: images/train
-val: images/val
-
-nc: 1 
-names: ["cone"] 
