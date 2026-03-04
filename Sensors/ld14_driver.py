@@ -1,5 +1,6 @@
 import serial
 import struct
+import time
 
 FRAME_HEADER = b'\x54\x2C'
 FRAME_LEN = 47
@@ -11,11 +12,9 @@ class LD14Driver:
         self.buffer = bytearray()
 
     def _parse_frame(self, frame):
-        # Start and end angles (0.01° units)
         start_angle = struct.unpack('<H', frame[4:6])[0] / 100.0
         end_angle = struct.unpack('<H', frame[42:44])[0] / 100.0
 
-        # Angle step with rollover
         angle_diff = end_angle - start_angle
         if angle_diff < 0:
             angle_diff += 360
@@ -48,15 +47,15 @@ class LD14Driver:
                     self.buffer.pop(0)
 
     def read_rotation(self):
-        """Yield (angle_deg, distance_m, intensity) for one full rotation."""
+        # Yield (timestamp, angle_deg, distance_m, intensity) for one full rotation
         rotation_points = []
         last_angle = None
 
         for frame_points in self.read_frame():
             for angle_deg, distance, intensity in frame_points:
                 if last_angle is not None and angle_deg < last_angle - 180:
-                    # Full rotation completed
-                    yield rotation_points
+                    timestamp = time.perf_counter()
+                    yield timestamp, rotation_points
                     rotation_points = []
 
                 rotation_points.append((angle_deg, distance, intensity))

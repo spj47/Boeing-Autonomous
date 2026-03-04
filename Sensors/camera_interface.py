@@ -1,11 +1,6 @@
 import cv2
 
 class Webcam:
-    """
-    A simple class to handle webcam operations: open, capture images, 
-    show video feed, and close.
-    """
-
     def __init__(self, index=0):
         """
         Initializes the webcam.
