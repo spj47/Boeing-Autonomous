@@ -20,11 +20,16 @@ bool servoMoving           = false;       // True when the servo is moving to a 
 int targetPos              = currentPos;  // Defines where we want the servo to be
 unsigned long lastStepTime = 0;           // Defines the time since the last step of the servo motor
 
+// Misc
+const byte ALL_ADDRESS   = 0x00;
+const byte LOCAL_ADDRESS = 0x03;
+const int BAUD_RATE      = 9600;
+
 void setup() {
   servo.attach(SERVO_PIN, LOWER_BOUND, HIGHER_BOUND);
   servo.writeMicroseconds(currentPos);
 
-  Serial.begin(9600);
+  Serial.begin(BAUD_RATE);
 }
 
 void loop() {
@@ -94,8 +99,7 @@ void setManualMode(bool isManual) {
 }
 
 void enterManualMode() {
-  // Both subsystems using this motor have mechanical manual modes
-  // So setting it to 0% means theres no electrical interference
+  // Set to Lower Bound to completely disengage the calibers from the pad
   moveServo(LOWER_BOUND);
 }
 
@@ -106,24 +110,60 @@ void handleSerial() {
 
     Usage:
       "S:" - This sets the servo position
-        Example command sent from the PI: "S:0\n"
-                                          "S:50\n"
-                                          "S:100\n"
+        Example command sent from the PI: "03:S:0\n"
+                                          "03:S:50\n"
+                                          "03:S:100\n"
       "T" -  This toggles manual mode 
-        Example command sent from the PI: "T\n"
+        Example command sent from the PI: "03:T\n"
       "M:" -  This sets manual mode 
-        Example command sent from the PI: "M:1\n" (enter manaul mode)
-                                          "M:0\n" (exit manual mode)
+        Example command sent from the PI: "03:M:1\n" (enter manaul mode)
+                                          "03:M:0\n" (exit manual mode)
+      "E" - This sets steering into emergency mode
+        Example Command sent from the PI: "03:E\n"
   */
 
   if (!Serial.available()) return;
 
-  String cmd = Serial.readStringUntil('\n');
+  String cmd = Serial.readStringUntil('\n'); // read the command until its end
   cmd.trim();
 
+  // Check to make sure the command was meant for this adruino
+  if (!(cmd.startsWith(ALL_ADDRESS) || cmd.startsWith(LOCAL_ADDRESS)))
+  {
+    return;
+  }
+
+  // Remove the address + separator
+  int sepIndex = cmd.indexOf(':');
+  if (sepIndex != -1) 
+  {
+    cmd = cmd.substring(sepIndex + 1);
+  }
+
+  // Remove case senstivity
+  cmd.toUpperCase();
+
+  // Proccess the command
   if (cmd.startsWith("S:")) {
-    int percent = cmd.substring(2).toInt();
-    driveServo(percent);
+    // Seperate the numbers from the percent
+    int sepIndex = cmd.indexOf(':');
+    if (sepIndex != -1) 
+    {
+        cmd = cmd.substring(sepIndex + 1);
+    }
+
+    // throttle commands only work in AUTO mode
+    int percent = cmd.toInt();
+    
+    // toInt() returns 0 for non-numeric, so verify input is "0"
+    if (percent == 0 && cmd != "0")
+    {
+        Serial.println("ERR:UNKNOWN");
+    }
+    else 
+    {
+      driveServo(percent);
+    }
   }
   else if (cmd == "T") {
     toggleManualMode();
@@ -131,5 +171,8 @@ void handleSerial() {
   else if (cmd.startsWith("M:")) {
     bool setManual = (cmd.substring(2).toInt() == 1);
     setManualMode(setManual);
+  }
+  else if (cmd == "E") {
+    setManualMode(true);
   }
 }

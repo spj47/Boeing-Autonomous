@@ -1,22 +1,17 @@
 #include <Servo.h>
 
+// Servo data
 Servo servo;
-
 const int SERVO_PIN = 9;
 
-const int MANUAL_DRIVER_FORWARD_PIN = 2;
-const int MANUAL_DRIVER_BACKWARD_PIN = 3;
-const int MANUAL_ENABLE_BUTTON = 4;
-const int MANUAL_DISABLE_BUTTON = 5;
+// Motion handling (Both of these combined determine how quickly the servo moves)
+const int STEP_SIZE_US  = 5;
+const int STEP_DELAY_MS = 3;
 
 // Servo pulse limits (µs)
 const int LOWER_BOUND  = 1000;
 const int HIGHER_BOUND = 2000;
 const int BOUND_DIFF   = HIGHER_BOUND - LOWER_BOUND;
-
-// Motion handling (Both of these combined determine how quickly the servo moves)
-const int STEP_SIZE_US  = 5;
-const int STEP_DELAY_MS = 3;
 
 // Servo State Control
 int currentPos             = LOWER_BOUND; // initialize to lower bound
@@ -24,10 +19,21 @@ bool servoMoving           = false;       // True when the servo is moving to a 
 int targetPos              = currentPos;  // Defines where we want the servo to be
 unsigned long lastStepTime = 0;           // Defines the time since the last step of the servo motor
 
+// Manual pins
+const int MANUAL_DRIVER_FORWARD_PIN  = 2;
+const int MANUAL_DRIVER_BACKWARD_PIN = 3;
+const int MANUAL_ENABLE_BUTTON       = 4;
+const int MANUAL_DISABLE_BUTTON      = 5;
+
 // Manual State Control
 bool inManualMode          = false;       // True when in manual mode (This stops the driver funciton from getting run when true!!)
 bool actuatingManual       = false;       // True when linear actuator is in motion to stop other inputs
 bool deactuatingManual     = false;       // True when linear actuator is in motion to stop other inputs
+
+// Misc
+const byte ALL_ADDRESS   = 0x00;
+const byte LOCAL_ADDRESS = 0x01;
+const int BAUD_RATE      = 9600;
 
 void setup() {
   servo.attach(SERVO_PIN, LOWER_BOUND, HIGHER_BOUND);
@@ -38,7 +44,7 @@ void setup() {
   pinMode(MANUAL_ENABLE_BUTTON, INPUT);
   pinMode(MANUAL_DISABLE_BUTTON, INPUT);
 
-  Serial.begin(9600);
+  Serial.begin(BAUD_RATE);
 }
 
 void loop() {
@@ -147,26 +153,61 @@ void handleSerial() {
 
     Usage:
       "S:" - This sets the servo position
-        Example command sent from the PI: "S:0\n"
-                                          "S:50\n"
-                                          "S:100\n"
+        Example command sent from the PI: "01:S:0\n"
+                                          "01:S:50\n"
+                                          "01:S:100\n"
       "T" -  This toggles manual mode 
-        Example command sent from the PI: "T\n"
+        Example command sent from the PI: "01:T\n"
       "M:" -  This sets manual mode 
-        Example command sent from the PI: "M:1\n" (enter manaul mode)
-                                          "M:0\n" (exit manual mode)
+        Example command sent from the PI: "01:M:1\n" (enter manaul mode)
+                                          "01:M:0\n" (exit manual mode)
       "E" - This sets steering into emergency mode
-        Example Command sent from the PI: "E\n"
+        Example Command sent from the PI: "01:E\n"
   */
 
   if (!Serial.available()) return;
 
-  String cmd = Serial.readStringUntil('\n');
+  String cmd = Serial.readStringUntil('\n'); // read the command until its end
   cmd.trim();
 
-  if (cmd.startsWith("S:")) {
-    int percent = cmd.substring(2).toInt();
-    driveServo(percent);
+  // Check to make sure the command was meant for this adruino
+  if (!(cmd.startsWith(ALL_ADDRESS) || cmd.startsWith(LOCAL_ADDRESS)))
+  {
+    return;
+  }
+
+  // Remove the address + separator
+  int sepIndex = cmd.indexOf(':');
+  if (sepIndex != -1) 
+  {
+    cmd = cmd.substring(sepIndex + 1);
+  }
+
+  // Remove case senstivity
+  cmd.toUpperCase();
+
+  // Proccess the command
+  if (cmd.startsWith("S:")) 
+  {
+    // Seperate the numbers from the percent
+    int sepIndex = cmd.indexOf(':');
+    if (sepIndex != -1) 
+    {
+        cmd = cmd.substring(sepIndex + 1);
+    }
+
+    // throttle commands only work in AUTO mode
+    int percent = cmd.toInt();
+
+    // toInt() returns 0 for non-numeric, so verify input is "0"
+    if (percent == 0 && cmd != "0")
+    {
+        Serial.println("ERR:UNKNOWN");
+    }
+    else 
+    {
+      driveServo(percent);
+    }
   }
   else if (cmd == "T") {
     toggleManualMode();
