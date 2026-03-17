@@ -4,10 +4,10 @@ Servo servo;
 
 const int SERVO_PIN = 9;
 
-const int MANUAL_DRIVER_FORWARD_PIN = 1;
-const int MANUAL_DRIVER_BACKWARD_PIN = 2;
-const int MANUAL_ENABLE_BUTTON = 3;
-const int MANUAL_DISABLE_BUTTON = 4;
+const int MANUAL_DRIVER_FORWARD_PIN = 2;
+const int MANUAL_DRIVER_BACKWARD_PIN = 3;
+const int MANUAL_ENABLE_BUTTON = 4;
+const int MANUAL_DISABLE_BUTTON = 5;
 
 // Servo pulse limits (µs)
 const int LOWER_BOUND  = 1000;
@@ -64,7 +64,7 @@ void loop() {
 
 bool checkManual(int pin)
 {
-    return digitalRead(pin) > 3;
+    return digitalRead(pin);
 }
 
 // ===== Servo Control =====
@@ -155,6 +155,8 @@ void handleSerial() {
       "M:" -  This sets manual mode 
         Example command sent from the PI: "M:1\n" (enter manaul mode)
                                           "M:0\n" (exit manual mode)
+      "E" - This sets steering into emergency mode
+        Example Command sent from the PI: "E\n"
   */
 
   if (!Serial.available()) return;
@@ -172,5 +174,8 @@ void handleSerial() {
   else if (cmd.startsWith("M:")) {
     bool setManual = (cmd.substring(2).toInt() == 1);
     setManualMode(setManual);
+  }
+  else if (cmd == "E") {
+    setManualMode(true);
   }
 }
