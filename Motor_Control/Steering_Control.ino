@@ -35,6 +35,11 @@ const byte ALL_ADDRESS   = 0x00;
 const byte LOCAL_ADDRESS = 0x01;
 const int BAUD_RATE      = 9600;
 
+// Debug
+const bool IS_DEBUG      = true;
+float debugTimer         = 0;
+float debugTime          = 1000;
+
 void setup() {
   servo.attach(SERVO_PIN, LOWER_BOUND, HIGHER_BOUND);
   servo.writeMicroseconds(currentPos);
@@ -48,13 +53,31 @@ void setup() {
 }
 
 void loop() {
+  if (IS_DEBUG)
+  {
+    if (millis() - debugTimer > debugTime)
+    {
+      Serial.print("Manual Actuating - ");
+      Serial.print(actuatingManual);
+      Serial.print(" | Manual Deactuating - ");
+      Serial.println(deactuatingManual);
+      Serial.print("Servo Engaged Button - ");
+      Serial.print(checkManual(MANUAL_ENABLE_BUTTON));
+      Serial.print(" | Servo Disengaged Button - ");
+      Serial.println(checkManual(MANUAL_DISABLE_BUTTON));
+      debugTimer = millis();
+    }
+  }
+
+  handleSerial();
+
   if (actuatingManual)
   {
-    actuatingManual = checkManual(MANUAL_ENABLE_BUTTON);
+    actuatingManual = !checkManual(MANUAL_ENABLE_BUTTON);
     return;
   } else if (deactuatingManual)
   {
-    deactuatingManual = checkManual(MANUAL_DISABLE_BUTTON);
+    deactuatingManual = !checkManual(MANUAL_DISABLE_BUTTON);
     return;
   }
 
@@ -64,7 +87,6 @@ void loop() {
     digitalWrite(MANUAL_DRIVER_BACKWARD_PIN, LOW);
   }
 
-  handleSerial();
   updateServo();
 }
 
@@ -125,11 +147,15 @@ void driveServo(int percent) {
 }
 
 void toggleManualMode() {
+  if (actuatingManual || deactuatingManual) return;
+
   inManualMode = !inManualMode;
   setManualMode(inManualMode);
 }
 
 void setManualMode(bool isManual) {
+  if (actuatingManual || deactuatingManual) return;
+  
   inManualMode = isManual;
   if (inManualMode) enterManualMode();
   else exitManualMode();
