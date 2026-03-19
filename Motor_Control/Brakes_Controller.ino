@@ -128,7 +128,7 @@ void handleSerial() {
   cmd.trim();
 
   // Check to make sure the command was meant for this adruino
-  if (!(cmd.startsWith(ALL_ADDRESS) || cmd.startsWith(LOCAL_ADDRESS)))
+  if (!(cmd.startsWith(String(ALL_ADDRESS)) || cmd.startsWith(String(LOCAL_ADDRESS))))
   {
     return;
   }

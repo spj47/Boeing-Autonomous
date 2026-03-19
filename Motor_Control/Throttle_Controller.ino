@@ -57,6 +57,10 @@ const byte LOCAL_ADDRESS = 0x02;
 // set false to completely disable pot/manual mode
 const bool ENABLE_MANUAL_MODE = true;
 
+// ----> MUST BE <FALSE> IN ALL CASES THAT ARE NOT ISOLATED TESTS<-------
+const bool IS_DEBUG = false;
+// ----> MUST BE <FALSE> IN ALL CASES THAT ARE NOT ISOLATED TESTS<-------
+
 AccelStepper stepper(AccelStepper::DRIVER, PIN_STEP, PIN_DIR);
 
 // operating modes
@@ -100,14 +104,17 @@ void setup()
     isCalibrated = true;
 
     // report ready state
-    Serial.print("READY:");
-    if (currentMode == MANUAL)
+    if (IS_DEBUG)
     {
-        Serial.println("MANUAL");
-    }
-    else
-    {
-        Serial.println("AUTO");
+        Serial.print("READY:");
+        if (currentMode == MANUAL)
+        {
+            Serial.println("MANUAL");
+        }
+        else
+        {
+            Serial.println("AUTO");
+        }
     }
 }
 
@@ -120,7 +127,10 @@ void loop()
     if (potStream)
     {
         int potReading = analogRead(PIN_POT);
-        Serial.println(potReading);
+        if (IS_DEBUG)
+        {
+            Serial.println(potReading);
+        }
         delay(POT_STREAM_INTERVAL);
     }
 
@@ -222,7 +232,10 @@ void processManualControl()
     {
         stepper.setCurrentPosition(0);
         isCalibrated = true;
-        Serial.println("AUTO_CAL");
+        if (IS_DEBUG)
+        {
+            Serial.println("AUTO_CAL");
+        }
     }
 
     moveToThrottle(curvedThrottle);
@@ -258,12 +271,18 @@ void processSerial()
     if (cmdUpper == "CAL")
     {
         calibrate();
-        Serial.println("OK:CAL");
+        if (IS_DEBUG)
+        {
+            Serial.println("OK:CAL");
+        }
     }
     else if (cmdUpper == "E")
     {
         emergencyStop();
-        Serial.println("STOPPED");
+        if (IS_DEBUG)
+        {
+            Serial.println("STOPPED");
+        }
     }
     else if (cmdUpper == "STATUS")
     {
@@ -272,7 +291,7 @@ void processSerial()
     else if (cmdUpper == "POT")
     {
         potStream = !potStream;
-        if (!potStream)
+        if (!potStream && IS_DEBUG)
         {
             Serial.println("POT:OFF");
         }
@@ -280,16 +299,22 @@ void processSerial()
     else if (cmdUpper == "AUTO")
     {
         currentMode = AUTO;
-        Serial.println("MODE:AUTO");
+        if (IS_DEBUG)
+        {
+            Serial.println("MODE:AUTO");
+        }
     }
     else if (cmdUpper == "MANUAL")
     {
         if (ENABLE_MANUAL_MODE)
         {
             currentMode = MANUAL;
-            Serial.println("MODE:MANUAL");
+            if (IS_DEBUG)
+            {
+                Serial.println("MODE:MANUAL");
+            }
         }
-        else
+        else if (IS_DEBUG)
         {
             Serial.println("ERR:MANUAL_DISABLED");
         }
@@ -309,18 +334,28 @@ void processSerial()
         // toInt() returns 0 for non-numeric, so verify input is "0"
         if (percent == 0 && cmd != "0")
         {
-            Serial.println("ERR:UNKNOWN");
+            if (IS_DEBUG)
+            {
+                Serial.println("ERR:UNKNOWN");
+            }
         }
         else if (!isCalibrated)
         {
-            Serial.println("ERR:NOT_CAL");
+            if (IS_DEBUG)
+            {
+                Serial.println("ERR:NOT_CAL");
+            }
         }
         else
         {
             int curvedPercent = applyThrottleCurve(percent);
             moveToThrottle(curvedPercent);
-            Serial.print("OK:");
-            Serial.println(curvedPercent);
+
+            if (IS_DEBUG)
+            {
+                Serial.print("OK:");
+                Serial.println(curvedPercent);
+            }
         }
     }
     else if (cmd == "T") 
@@ -333,7 +368,10 @@ void processSerial()
     }
     else
     {
-        Serial.println("ERR:MANUAL_MODE");
+        if (IS_DEBUG)
+        {
+            Serial.println("ERR:MANUAL_MODE");
+        }
     }
 }
 
@@ -345,17 +383,26 @@ void setManualMode(bool isSetManual)
         if (ENABLE_MANUAL_MODE)
         {
             currentMode = MANUAL;
-            Serial.println("MODE:MANUAL");
+            if (IS_DEBUG)
+            {
+                Serial.println("MODE:MANUAL");
+            }
         }
         else
         {
-            Serial.println("ERR:MANUAL_DISABLED");
+            if (IS_DEBUG)
+            {
+                Serial.println("ERR:MANUAL_DISABLED");
+            }
         }
     }
     else 
     {   
         currentMode = AUTO;
-        Serial.println("MODE:AUTO");
+        if (IS_DEBUG)
+        {
+            Serial.println("MODE:AUTO");
+        }
     }
 }
 
