@@ -1,6 +1,6 @@
 const int HALL_PIN = 2; // THIS HAS TO BE EITHER D2 OR D3 | -------------------------->NO EXCPETION <-------------------------------------------------------------------------
 const float WHEEL_CIRCUMFRANCE = 1.28805298797; // 0.41m diameter * 3.1459
-const int NUMBER_MAGNETS = 6;
+const int NUMBER_MAGNETS = 2;
 
 // Velocity
 const int VELOCITY_SAMPLES = 5;
@@ -18,8 +18,9 @@ volatile unsigned long magPeriod = 0;
 const unsigned long MAG_DEBOUNCE_TIME = 50000; // us
 
 // Serial COM
-const char* HALL_ADR = "Ax7";
+const byte HALL_ADR = 07;
 const char* GET_DATA_COMMAND = "D";
+const bool ISDEBUG = false;
 
 void setup() 
 {
@@ -33,6 +34,11 @@ void setup()
 
 void loop() 
 {
+  if (ISDEBUG)
+  {
+    Serial.println(velocity);
+  }
+  
   UpdateVelocity();
   CheckSerial();
 }
@@ -44,7 +50,7 @@ void CheckSerial()
   String cmd = Serial.readStringUntil('\n');
   cmd.trim();
 
-  if (cmd.startsWith(HALL_ADR))
+  if (cmd.startsWith(String(HALL_ADR)))
   {
     if (cmd.endsWith(GET_DATA_COMMAND))
     {
