@@ -10,9 +10,9 @@
  *   02:M:<0-1>     - Sets manual mode
  *
  *   [DEPRECIATED] STATUS     - report current system state
- *   [DEPRECIATED] POT        - toggle potentiometer reading stream
+ *   [DEPRECIATED] PEDAL        - toggle pedal reading stream
  *   [DEPRECIATED] AUTO       - switch to autonomous mode (Pi control)
- *   [DEPRECIATED] MANUAL     - switch to manual mode (pot control)
+ *   [DEPRECIATED] MANUAL     - switch to manual mode (PEDAL control)
  * 
  * Error Codes:
  *   0x00 - No Error 
@@ -29,17 +29,17 @@
 const int PIN_STEP   = 3;    // DM556 PUL+
 const int PIN_DIR    = 4;    // DM556 DIR+
 const int PIN_ENABLE = 5;    // DM556 ENA+
-const int PIN_POT    = A0;   // potentiometer for manual control
+const int PIN_PEDAL    = A0;   // Pelda for manual control
 const int PIN_HALL_LEVER = A1;
 
-// potentiometer settings
-const int POT_MIN = 150;
-const int POT_MAX = 900;
-const int POT_DEADZONE = 5;
-const int POT_READ_INTERVAL = 50;
-const int POT_SAMPLES = 5;
-const int POT_SAMPLE_DELAY_US = 500;
-const int POT_STREAM_INTERVAL = 50;
+// Pelda settings
+const int PEDAL_MIN = 150;
+const int PEDAL_MAX = 900;
+const int PEDAL_DEADZONE = 5;
+const int PEDAL_READ_INTERVAL = 50;
+const int PEDAL_SAMPLES = 5;
+const int PEDAL_SAMPLE_DELAY_US = 500;
+const int PEDAL_STREAM_INTERVAL = 50;
 
 // throttle curve settings
 // 0.0 = linear, positive = more gradual at low end
@@ -56,7 +56,7 @@ const int BAUD_RATE = 9600;
 const byte ALL_ADDRESS   = 0x00;
 const byte LOCAL_ADDRESS = 0x02;
 
-// set false to completely disable pot/manual mode
+// set false to completely disable PEDAL/manual mode
 const bool ENABLE_MANUAL_MODE = true;
 
 // Hall Effect Values
@@ -85,9 +85,9 @@ Mode currentMode = MANUAL;
 bool isCalibrated = false;
 bool isEnabled = false;
 int currentThrottle = 0;
-int lastPotThrottle = 0;
-unsigned long lastPotRead = 0;
-bool potStream = false;
+int lastPEDALThrottle = 0;
+unsigned long lastPEDALRead = 0;
+bool PEDALStream = false;
 
 void setup()
 {
@@ -103,12 +103,12 @@ void setup()
     pinMode(PIN_ENABLE, OUTPUT);
     disableMotor();
 
-    // initialize pot reading to prevent startup drift
+    // initialize PEDAL reading to prevent startup drift
     if (ENABLE_MANUAL_MODE)
     {
-        int smoothedPot = readPotSmoothed();
-        int clampedPot = constrain(smoothedPot, POT_MIN, POT_MAX);
-        lastPotThrottle = map(clampedPot, POT_MIN, POT_MAX, 0, 100);
+        int smoothedPEDAL = readPEDALSmoothed();
+        int clampedPEDAL = constrain(smoothedPEDAL, PEDAL_MIN, PEDAL_MAX);
+        lastPEDALThrottle = map(clampedPEDAL, PEDAL_MIN, PEDAL_MAX, 0, 100);
     }
 
     // current position is home (0%)
@@ -136,18 +136,18 @@ void loop()
 {
     processSerial();
 
-    // stream pot readings when enabled
-    if (potStream)
+    // stream PEDAL readings when enabled
+    if (PEDALStream)
     {
-        int potReading = analogRead(PIN_POT);
+        int PEDALReading = analogRead(PIN_PEDAL);
         if (IS_DEBUG)
         {
-            Serial.println(potReading);
+            Serial.println(PEDALReading);
         }
-        delay(POT_STREAM_INTERVAL);
+        delay(PEDAL_STREAM_INTERVAL);
     }
 
-    // manual mode pot control
+    // manual mode PEDAL control
     if (ENABLE_MANUAL_MODE && currentMode == MANUAL)
     {
         processManualControl();
@@ -184,22 +184,22 @@ int applyThrottleCurve(int input)
     return constrain(output, 0, THROTTLE_LIMIT);
 }
 
-// read potentiometer with median filter to reject noise spikes
-int readPotSmoothed()
+// read Pelda with median filter to reject noise spikes
+int readPEDALSmoothed()
 {
-    int samples[POT_SAMPLES];
+    int samples[PEDAL_SAMPLES];
 
     // collect samples with small delay between reads
-    for (int i = 0; i < POT_SAMPLES; i++)
+    for (int i = 0; i < PEDAL_SAMPLES; i++)
     {
-        samples[i] = analogRead(PIN_POT);
-        delayMicroseconds(POT_SAMPLE_DELAY_US);
+        samples[i] = analogRead(PIN_PEDAL);
+        delayMicroseconds(PEDAL_SAMPLE_DELAY_US);
     }
 
     // bubble sort for median extraction (fine for small arrays)
-    for (int i = 0; i < POT_SAMPLES - 1; i++)
+    for (int i = 0; i < PEDAL_SAMPLES - 1; i++)
     {
-        for (int j = 0; j < POT_SAMPLES - i - 1; j++)
+        for (int j = 0; j < PEDAL_SAMPLES - i - 1; j++)
         {
             if (samples[j] > samples[j + 1])
             {
@@ -211,35 +211,35 @@ int readPotSmoothed()
     }
 
     // return median value
-    return samples[POT_SAMPLES / 2];
+    return samples[PEDAL_SAMPLES / 2];
 }
 
-// read potentiometer and update throttle in manual mode
+// read Pelda and update throttle in manual mode
 void processManualControl()
 {
-    // rate limit pot reads
+    // rate limit PEDAL reads
     unsigned long currentTime = millis();
-    if (currentTime - lastPotRead < POT_READ_INTERVAL)
+    if (currentTime - lastPEDALRead < PEDAL_READ_INTERVAL)
     {
         return;
     }
-    lastPotRead = currentTime;
+    lastPEDALRead = currentTime;
 
-    int rawPot = readPotSmoothed();
+    int rawPEDAL = readPEDALSmoothed();
 
     // constrain to valid range and map to percentage
-    rawPot = constrain(rawPot, POT_MIN, POT_MAX);
-    int potThrottle = map(rawPot, POT_MIN, POT_MAX, 0, 100);
+    rawPEDAL = constrain(rawPEDAL, PEDAL_MIN, PEDAL_MAX);
+    int PEDALThrottle = map(rawPEDAL, PEDAL_MIN, PEDAL_MAX, 0, 100);
 
     // apply deadzone to prevent jitter
-    int difference = abs(potThrottle - lastPotThrottle);
-    if (difference < POT_DEADZONE)
+    int difference = abs(PEDALThrottle - lastPEDALThrottle);
+    if (difference < PEDAL_DEADZONE)
     {
         return;
     }
-    lastPotThrottle = potThrottle;
+    lastPEDALThrottle = PEDALThrottle;
 
-    int curvedThrottle = applyThrottleCurve(potThrottle);
+    int curvedThrottle = applyThrottleCurve(PEDALThrottle);
 
     // auto-calibrate on first call if needed
     if (!isCalibrated)
@@ -309,12 +309,12 @@ void processSerial()
     {
         sendStatus();
     }
-    else if (cmdUpper == "POT")
+    else if (cmdUpper == "PEDAL")
     {
-        potStream = !potStream;
-        if (!potStream && IS_DEBUG)
+        PEDALStream = !PEDALStream;
+        if (!PEDALStream && IS_DEBUG)
         {
-            Serial.println("POT:OFF");
+            Serial.println("PEDAL:OFF");
         }
     }
     else if (cmdUpper == "AUTO")
