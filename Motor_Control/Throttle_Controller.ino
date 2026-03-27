@@ -13,6 +13,14 @@
  *   [DEPRECIATED] POT        - toggle potentiometer reading stream
  *   [DEPRECIATED] AUTO       - switch to autonomous mode (Pi control)
  *   [DEPRECIATED] MANUAL     - switch to manual mode (pot control)
+ * 
+ * Error Codes:
+ *   0x00 - No Error 
+ *   0x01 - (ERR:MANUAL_DISABLED) | System attempted to enter manual mode, but manual mode is disabled
+ *   0x02 - (ERR:UNKNOWN)         | A serial command to set the throttle was recieved, but the input is invalid
+ *   0x03 - (ERR:NOT_CAL)         | A serial command to set the throttle was recieved, but the system is not yet calibrated
+ *   0x04 - (ERR:MANUAL_MODE)     | A serial command to set the throttle was recieved, but the system is in manual mode
+ *   0x05 - (ERR:EMERGENCY_MODE)  | A serial command to set the throttle was recieved, but the system is in emergency mode and must be recalibrated
  */
 
 #include <AccelStepper.h>
@@ -21,14 +29,8 @@
 const int PIN_STEP   = 3;    // DM556 PUL+
 const int PIN_DIR    = 4;    // DM556 DIR+
 const int PIN_ENABLE = 5;    // DM556 ENA+
-const int PIN_LIMIT  = 2;    // limit switch (idle position)
 const int PIN_POT    = A0;   // potentiometer for manual control
-
-// throttle range in steps
-// 6400 steps = 180 degree rotation (half revolution)
-// negative = counter-clockwise, positive = clockwise
-const long THROTTLE_MIN = 0;
-const long THROTTLE_MAX = -6400;
+const int PIN_HALL_LEVER = A1;
 
 // potentiometer settings
 const int POT_MIN = 150;
@@ -56,6 +58,18 @@ const byte LOCAL_ADDRESS = 0x02;
 
 // set false to completely disable pot/manual mode
 const bool ENABLE_MANUAL_MODE = true;
+
+// Hall Effect Values
+float throttleMin;
+float throttleMax;
+const float hallBuffer = 20;
+
+// Stepper Meta Data
+long currentStep;
+float currentPercentTarget;
+const long STEP_SIZE = 10;
+bool isEmergencyStopped;
+byte currentErrorCode = 0x00;
 
 // ----> MUST BE <FALSE> IN ALL CASES THAT ARE NOT ISOLATED TESTS<-------
 const bool IS_DEBUG = false;
@@ -89,9 +103,6 @@ void setup()
     pinMode(PIN_ENABLE, OUTPUT);
     disableMotor();
 
-    // limit switch with internal pull-up (connects to GND when triggered)
-    pinMode(PIN_LIMIT, INPUT_PULLUP);
-
     // initialize pot reading to prevent startup drift
     if (ENABLE_MANUAL_MODE)
     {
@@ -101,7 +112,9 @@ void setup()
     }
 
     // current position is home (0%)
-    isCalibrated = true;
+    pinMode(PIN_HALL_LEVER, INPUT);
+    
+    calibrate();
 
     // report ready state
     if (IS_DEBUG)
@@ -143,6 +156,7 @@ void loop()
     // run stepper (non-blocking, must be called frequently)
     if (isEnabled)
     {
+        moveThrottle();
         stepper.run();
     }
 }
@@ -230,8 +244,7 @@ void processManualControl()
     // auto-calibrate on first call if needed
     if (!isCalibrated)
     {
-        stepper.setCurrentPosition(0);
-        isCalibrated = true;
+        calibrate();
         if (IS_DEBUG)
         {
             Serial.println("AUTO_CAL");
@@ -276,6 +289,14 @@ void processSerial()
             Serial.println("OK:CAL");
         }
     }
+    else if (isEmergencyStopped)
+    {
+        if (IS_DEBUG)
+        {
+            Serial.println("ERR:EMERGENCY_MODE");
+        }
+        currentErrorCode = 0x05;
+    }
     else if (cmdUpper == "E")
     {
         emergencyStop();
@@ -314,9 +335,13 @@ void processSerial()
                 Serial.println("MODE:MANUAL");
             }
         }
-        else if (IS_DEBUG)
+        else
         {
-            Serial.println("ERR:MANUAL_DISABLED");
+            if (IS_DEBUG)
+            {
+                Serial.println("ERR:MANUAL_DISABLED");
+            }
+            currentErrorCode = 0x01;
         }
     }
     else if (currentMode == AUTO && cmd.startsWith("S:"))
@@ -338,6 +363,7 @@ void processSerial()
             {
                 Serial.println("ERR:UNKNOWN");
             }
+            currentErrorCode = 0x02;
         }
         else if (!isCalibrated)
         {
@@ -345,6 +371,7 @@ void processSerial()
             {
                 Serial.println("ERR:NOT_CAL");
             }
+            currentErrorCode = 0x03;
         }
         else
         {
@@ -372,6 +399,7 @@ void processSerial()
         {
             Serial.println("ERR:MANUAL_MODE");
         }
+        currentErrorCode = 0x04;
     }
 }
 
@@ -394,6 +422,7 @@ void setManualMode(bool isSetManual)
             {
                 Serial.println("ERR:MANUAL_DISABLED");
             }
+            currentErrorCode = 0x01;
         }
     }
     else 
@@ -426,10 +455,28 @@ void moveToThrottle(int percent)
     percent = constrain(percent, 0, 100);
     currentThrottle = percent;
 
-    long targetSteps = map(percent, 0, 100, THROTTLE_MIN, THROTTLE_MAX);
+    currentPercentTarget = map(percent, 0, 100, throttleMin, throttleMax);
+}
+
+void moveThrottle()
+{
+    float currentHallValue = analogRead(PIN_HALL_LEVER);
+
+    if (currentPercentTarget - currentHallValue > hallBuffer)
+    {
+        currentStep -= STEP_SIZE;
+    }
+    else if (currentPercentTarget - currentHallValue < -hallBuffer)
+    {
+        currentStep += STEP_SIZE;
+    }
+    else 
+    {
+        return;
+    }
 
     enableMotor();
-    stepper.moveTo(targetSteps);
+    stepper.moveTo(currentStep);
 }
 
 // calibrate: set current position as idle (0%)
@@ -439,86 +486,70 @@ void calibrate()
     disableMotor();
     stepper.setCurrentPosition(0);
     currentThrottle = 0;
+    throttleMin = analogRead(PIN_HALL_LEVER);
+    throttleMax = throttleMin + 100;
+    currentStep = 0;
+    currentPercentTarget = 0;
+    isEmergencyStopped = false;
     isCalibrated = true;
 }
 
 // emergency stop: halt motor and disable driver
 void emergencyStop()
 {
-    stepper.stop();
-
-    // clear movement target by locking current position
-    long currentPos = stepper.currentPosition();
-    stepper.setCurrentPosition(currentPos);
-
-    disableMotor();
-    currentThrottle = map(currentPos, THROTTLE_MIN, THROTTLE_MAX, 0, 100);
-}
-
-// check if limit switch is triggered (throttle at idle)
-bool isAtIdle()
-{
-    return digitalRead(PIN_LIMIT) == LOW;
+    // Set Stepper to go to 0
+    moveToThrottle(0);
+    isEmergencyStopped = true;
 }
 
 // get actual throttle percentage based on step position
 int getActualThrottle()
 {
-    long currentPos = stepper.currentPosition();
-    return map(currentPos, THROTTLE_MIN, THROTTLE_MAX, 0, 100);
+    long currentPos = analogRead(PIN_HALL_LEVER);
+    return map(currentPos, throttleMin, throttleMax, 0, 100);
 }
 
 // send current system status over serial
 void sendStatus()
 {
     int actualThrottle = getActualThrottle();
-    bool atIdle = isAtIdle();
 
-    Serial.print("S:");
+    if (IS_DEBUG)
+    { Serial.print("Requested Throttle:"); }
+    else 
+    { Serial.print("S:"); }
     Serial.print(currentThrottle);
-    Serial.print(",");
+
+    if (IS_DEBUG)
+    { Serial.print(" | Actual Throttle: "); }
+    else 
+    { Serial.print(":"); }
     Serial.print(actualThrottle);
-    Serial.print(",");
 
-    if (isEnabled)
-    {
-        Serial.print("1");
-    }
-    else
-    {
-        Serial.print("0");
-    }
+    if (IS_DEBUG)
+    { Serial.print(" | In Emergency Mode: "); }
+    else 
+    { Serial.print(":"); }
+    Serial.print(isEmergencyStopped);
 
-    Serial.print(",");
+    if (IS_DEBUG) 
+    { Serial.println(""); }
 
-    if (isCalibrated)
-    {
-        Serial.print("1");
-    }
-    else
-    {
-        Serial.print("0");
-    }
+    if (IS_DEBUG)
+    { Serial.print("Is Enabled: "); }
+    else 
+    { Serial.print(":"); }
+    Serial.print(isEnabled);
 
-    Serial.print(",");
+    if (IS_DEBUG)
+    { Serial.print(" | Is Calibrated: "); }
+    else 
+    { Serial.print(":"); }
+    Serial.print(isCalibrated);
 
-    if (atIdle)
-    {
-        Serial.print("1");
-    }
-    else
-    {
-        Serial.print("0");
-    }
-
-    Serial.print(",");
-
-    if (currentMode == MANUAL)
-    {
-        Serial.println("M");
-    }
-    else
-    {
-        Serial.println("A");
-    }
+    if (IS_DEBUG)
+    { Serial.print(" | Is Manual Mode: "); }
+    else 
+    { Serial.print(":"); }
+    Serial.print(currentMode == MANUAL);
 }
