@@ -26,10 +26,10 @@
 #include <AccelStepper.h>
 
 // pin assignments
-const int PIN_STEP   = 3;    // DM556 PUL+
-const int PIN_DIR    = 4;    // DM556 DIR+
-const int PIN_ENABLE = 5;    // DM556 ENA+
-const int PIN_PEDAL    = A0;   // Pelda for manual control
+const int PIN_STEP = 3;    // DM556 PUL+
+const int PIN_DIR = 4;     // DM556 DIR+
+const int PIN_ENABLE = 5;  // DM556 ENA+
+const int PIN_PEDAL = A0;  // Pedal for manual control
 const int PIN_HALL_LEVER = A1;
 
 // Pelda settings
@@ -50,10 +50,12 @@ const float PERCENT_SCALE = 100.0;
 // motion profile (tuned for 64x microstepping)
 const float SPEED_MAX = 12000.0;
 const float ACCELERATION = 50000.0;
+const long MORE_THROTTLE = -6400;
+const long LESS_THROTTLE = 6400;
 
 // serial communication
 const int BAUD_RATE = 9600;
-const byte ALL_ADDRESS   = 0x00;
+const byte ALL_ADDRESS = 0x00;
 const byte LOCAL_ADDRESS = 0x02;
 
 // set false to completely disable PEDAL/manual mode
@@ -62,12 +64,11 @@ const bool ENABLE_MANUAL_MODE = true;
 // Hall Effect Values
 float throttleMin;
 float throttleMax;
-const float hallBuffer = 20;
+const float hallBuffer = 2;
 
 // Stepper Meta Data
 long currentStep;
 float currentPercentTarget;
-const long STEP_SIZE = 10;
 bool isEmergencyStopped;
 byte currentErrorCode = 0x00;
 
@@ -78,7 +79,8 @@ const bool IS_DEBUG = false;
 AccelStepper stepper(AccelStepper::DRIVER, PIN_STEP, PIN_DIR);
 
 // operating modes
-enum Mode { MANUAL, AUTO };
+enum Mode { MANUAL,
+            AUTO };
 
 // note: arduino requires global state for setup()/loop() architecture
 Mode currentMode = MANUAL;
@@ -88,468 +90,408 @@ int currentThrottle = 0;
 int lastPEDALThrottle = 0;
 unsigned long lastPEDALRead = 0;
 bool PEDALStream = false;
+bool isMoving = false;
 
-void setup()
-{
-    Serial.begin(BAUD_RATE);
-    analogReference(DEFAULT);
+void setup() {
+  Serial.begin(BAUD_RATE);
+  analogReference(DEFAULT);
 
-    // configure stepper motor
-    stepper.setMaxSpeed(SPEED_MAX);
-    stepper.setAcceleration(ACCELERATION);
-    stepper.setCurrentPosition(0);
+  // configure stepper motor
+  stepper.setMaxSpeed(SPEED_MAX);
+  stepper.setAcceleration(ACCELERATION);
+  stepper.setCurrentPosition(0);
 
-    // DM556: LOW = enabled, HIGH = disabled
-    pinMode(PIN_ENABLE, OUTPUT);
-    disableMotor();
+  // DM556: LOW = enabled, HIGH = disabled
+  pinMode(PIN_ENABLE, OUTPUT);
+  disableMotor();
 
-    // initialize PEDAL reading to prevent startup drift
-    if (ENABLE_MANUAL_MODE)
-    {
-        int smoothedPEDAL = readPEDALSmoothed();
-        int clampedPEDAL = constrain(smoothedPEDAL, PEDAL_MIN, PEDAL_MAX);
-        lastPEDALThrottle = map(clampedPEDAL, PEDAL_MIN, PEDAL_MAX, 0, 100);
+  // initialize PEDAL reading to prevent startup drift
+  if (ENABLE_MANUAL_MODE) {
+    int smoothedPEDAL = readPEDALSmoothed();
+    int clampedPEDAL = constrain(smoothedPEDAL, PEDAL_MIN, PEDAL_MAX);
+    lastPEDALThrottle = map(clampedPEDAL, PEDAL_MIN, PEDAL_MAX, 0, 100);
+  }
+
+  // current position is home (0%)
+  pinMode(PIN_HALL_LEVER, INPUT);
+
+  calibrate();
+
+  // report ready state
+  if (IS_DEBUG) {
+    Serial.print("READY:");
+    if (currentMode == MANUAL) {
+      Serial.println("MANUAL");
+    } else {
+      Serial.println("AUTO");
     }
-
-    // current position is home (0%)
-    pinMode(PIN_HALL_LEVER, INPUT);
-    
-    calibrate();
-
-    // report ready state
-    if (IS_DEBUG)
-    {
-        Serial.print("READY:");
-        if (currentMode == MANUAL)
-        {
-            Serial.println("MANUAL");
-        }
-        else
-        {
-            Serial.println("AUTO");
-        }
-    }
+  }
 }
 
 // main loop
-void loop()
-{
-    processSerial();
+void loop() {
+  processSerial();
 
-    // stream PEDAL readings when enabled
-    if (PEDALStream)
-    {
-        int PEDALReading = analogRead(PIN_PEDAL);
-        if (IS_DEBUG)
-        {
-            Serial.println(PEDALReading);
-        }
-        delay(PEDAL_STREAM_INTERVAL);
+  // stream PEDAL readings when enabled
+  if (PEDALStream) {
+    int PEDALReading = analogRead(PIN_PEDAL);
+    if (IS_DEBUG) {
+      Serial.println(PEDALReading);
     }
+    delay(PEDAL_STREAM_INTERVAL);
+  }
 
-    // manual mode PEDAL control
-    if (ENABLE_MANUAL_MODE && currentMode == MANUAL)
-    {
-        processManualControl();
-    }
+  // manual mode PEDAL control
+  if (ENABLE_MANUAL_MODE && currentMode == MANUAL) {
+    processManualControl();
+  }
 
-    // run stepper (non-blocking, must be called frequently)
-    if (isEnabled)
-    {
-        moveThrottle();
-        stepper.run();
-    }
+  // Check if the motor is moving and if it reached its destination
+  if (abs(currentPercentTarget - getActualThrottle()) < hallBuffer)
+  {
+    stepper.stop();
+    long currentPos = stepper.currentPosition();
+    stepper.setCurrentPosition(currentPos);
+  }
+
+  // run stepper (non-b locking, must be called frequently)
+  if (isEnabled) {
+    stepper.run();
+  }
 }
 
 // apply throttle curve for finer control at low throttle
 // input: 0-100, returns: 0-100 curved output
-int applyThrottleCurve(int input)
-{
-    if (THROTTLE_CURVE <= 0.0)
-    {
-        return input;
-    }
+int applyThrottleCurve(int input) {
+  if (THROTTLE_CURVE <= 0.0) {
+    return input;
+  }
 
-    // normalize to 0.0-1.0 range (mathematical formula)
-    float x = input / PERCENT_SCALE;
+  // normalize to 0.0-1.0 range (mathematical formula)
+  float x = input / PERCENT_SCALE;
 
-    // x^(1 + curve) gives more resolution at low end
-    float curved = pow(x, 1.0 + THROTTLE_CURVE);
+  // x^(1 + curve) gives more resolution at low end
+  float curved = pow(x, 1.0 + THROTTLE_CURVE);
 
-    // blend between linear and curved response
-    float result = (1.0 - THROTTLE_CURVE) * x + THROTTLE_CURVE * curved;
+  // blend between linear and curved response
+  float result = (1.0 - THROTTLE_CURVE) * x + THROTTLE_CURVE * curved;
 
-    // scale back to percentage and apply limit
-    int output = (int)(result * THROTTLE_LIMIT);
-    return constrain(output, 0, THROTTLE_LIMIT);
+  // scale back to percentage and apply limit
+  int output = (int)(result * THROTTLE_LIMIT);
+  return constrain(output, 0, THROTTLE_LIMIT);
 }
 
 // read Pelda with median filter to reject noise spikes
-int readPEDALSmoothed()
-{
-    int samples[PEDAL_SAMPLES];
+int readPEDALSmoothed() {
+  int samples[PEDAL_SAMPLES];
 
-    // collect samples with small delay between reads
-    for (int i = 0; i < PEDAL_SAMPLES; i++)
-    {
-        samples[i] = analogRead(PIN_PEDAL);
-        delayMicroseconds(PEDAL_SAMPLE_DELAY_US);
+  // collect samples with small delay between reads
+  for (int i = 0; i < PEDAL_SAMPLES; i++) {
+    samples[i] = analogRead(PIN_PEDAL);
+    delayMicroseconds(PEDAL_SAMPLE_DELAY_US);
+  }
+
+  // bubble sort for median extraction (fine for small arrays)
+  for (int i = 0; i < PEDAL_SAMPLES - 1; i++) {
+    for (int j = 0; j < PEDAL_SAMPLES - i - 1; j++) {
+      if (samples[j] > samples[j + 1]) {
+        int temp = samples[j];
+        samples[j] = samples[j + 1];
+        samples[j + 1] = temp;
+      }
     }
+  }
 
-    // bubble sort for median extraction (fine for small arrays)
-    for (int i = 0; i < PEDAL_SAMPLES - 1; i++)
-    {
-        for (int j = 0; j < PEDAL_SAMPLES - i - 1; j++)
-        {
-            if (samples[j] > samples[j + 1])
-            {
-                int temp = samples[j];
-                samples[j] = samples[j + 1];
-                samples[j + 1] = temp;
-            }
-        }
-    }
-
-    // return median value
-    return samples[PEDAL_SAMPLES / 2];
+  // return median value
+  return samples[PEDAL_SAMPLES / 2];
 }
 
 // read Pelda and update throttle in manual mode
-void processManualControl()
-{
-    // rate limit PEDAL reads
-    unsigned long currentTime = millis();
-    if (currentTime - lastPEDALRead < PEDAL_READ_INTERVAL)
-    {
-        return;
+void processManualControl() {
+  // rate limit PEDAL reads
+  unsigned long currentTime = millis();
+  if (currentTime - lastPEDALRead < PEDAL_READ_INTERVAL) {
+    return;
+  }
+  lastPEDALRead = currentTime;
+
+  int rawPEDAL = readPEDALSmoothed();
+
+  // constrain to valid range and map to percentage
+  rawPEDAL = constrain(rawPEDAL, PEDAL_MIN, PEDAL_MAX);
+  int PEDALThrottle = map(rawPEDAL, PEDAL_MIN, PEDAL_MAX, 0, 100);
+
+  // apply deadzone to prevent jitter
+  int difference = abs(PEDALThrottle - lastPEDALThrottle);
+  if (difference < PEDAL_DEADZONE) {
+    return;
+  }
+  lastPEDALThrottle = PEDALThrottle;
+
+  int curvedThrottle = applyThrottleCurve(PEDALThrottle);
+
+  // auto-calibrate on first call if needed
+  if (!isCalibrated) {
+    calibrate();
+    if (IS_DEBUG) {
+      Serial.println("AUTO_CAL");
     }
-    lastPEDALRead = currentTime;
+  }
 
-    int rawPEDAL = readPEDALSmoothed();
-
-    // constrain to valid range and map to percentage
-    rawPEDAL = constrain(rawPEDAL, PEDAL_MIN, PEDAL_MAX);
-    int PEDALThrottle = map(rawPEDAL, PEDAL_MIN, PEDAL_MAX, 0, 100);
-
-    // apply deadzone to prevent jitter
-    int difference = abs(PEDALThrottle - lastPEDALThrottle);
-    if (difference < PEDAL_DEADZONE)
-    {
-        return;
-    }
-    lastPEDALThrottle = PEDALThrottle;
-
-    int curvedThrottle = applyThrottleCurve(PEDALThrottle);
-
-    // auto-calibrate on first call if needed
-    if (!isCalibrated)
-    {
-        calibrate();
-        if (IS_DEBUG)
-        {
-            Serial.println("AUTO_CAL");
-        }
-    }
-
-    moveToThrottle(curvedThrottle);
+  moveToThrottle(curvedThrottle);
 }
 
 // serial command processing (handles all serial I/O)
-void processSerial()
-{
-    if (!Serial.available())
-    {
-        return;
+void processSerial() {
+  if (!Serial.available()) {
+    return;
+  }
+
+  String cmd = Serial.readStringUntil('\n');
+  cmd.trim();
+
+  // Check to make sure the command was meant for this adruino
+  if (!(cmd.startsWith(String(ALL_ADDRESS)) || cmd.startsWith(String(LOCAL_ADDRESS)))) {
+    return;
+  }
+
+  // Remove the address + separator
+  int sepIndex = cmd.indexOf(':');
+  if (sepIndex != -1) {
+    cmd = cmd.substring(sepIndex + 1);
+  }
+
+  String cmdUpper = cmd;
+  cmdUpper.toUpperCase();
+
+  if (cmdUpper == "CAL") {
+    calibrate();
+    if (IS_DEBUG) {
+      Serial.println("OK:CAL");
     }
-
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
-
-    // Check to make sure the command was meant for this adruino
-    if (!(cmd.startsWith(String(ALL_ADDRESS)) || cmd.startsWith(String(LOCAL_ADDRESS))))
-    {
-        return;
+  } else if (isEmergencyStopped) {
+    if (IS_DEBUG) {
+      Serial.println("ERR:EMERGENCY_MODE");
     }
-
-    // Remove the address + separator
+    currentErrorCode = 0x05;
+  } else if (cmdUpper == "E") {
+    emergencyStop();
+    if (IS_DEBUG) {
+      Serial.println("STOPPED");
+    }
+  } else if (cmdUpper == "STATUS") {
+    sendStatus();
+  } else if (cmdUpper == "PEDAL") {
+    PEDALStream = !PEDALStream;
+    if (!PEDALStream && IS_DEBUG) {
+      Serial.println("PEDAL:OFF");
+    }
+  } else if (cmdUpper == "AUTO") {
+    currentMode = AUTO;
+    if (IS_DEBUG) {
+      Serial.println("MODE:AUTO");
+    }
+  } else if (cmdUpper == "MANUAL") {
+    if (ENABLE_MANUAL_MODE) {
+      currentMode = MANUAL;
+      if (IS_DEBUG) {
+        Serial.println("MODE:MANUAL");
+      }
+    } else {
+      if (IS_DEBUG) {
+        Serial.println("ERR:MANUAL_DISABLED");
+      }
+      currentErrorCode = 0x01;
+    }
+  } else if (currentMode == AUTO && cmd.startsWith("S:")) {
+    // Seperate the numbers from the percent
     int sepIndex = cmd.indexOf(':');
-    if (sepIndex != -1) 
-    {
-        cmd = cmd.substring(sepIndex + 1);
+    if (sepIndex != -1) {
+      cmd = cmd.substring(sepIndex + 1);
     }
 
-    String cmdUpper = cmd;
-    cmdUpper.toUpperCase();
+    // throttle commands only work in AUTO mode
+    int percent = cmd.toInt();
 
-    if (cmdUpper == "CAL")
-    {
-        calibrate();
-        if (IS_DEBUG)
-        {
-            Serial.println("OK:CAL");
-        }
-    }
-    else if (isEmergencyStopped)
-    {
-        if (IS_DEBUG)
-        {
-            Serial.println("ERR:EMERGENCY_MODE");
-        }
-        currentErrorCode = 0x05;
-    }
-    else if (cmdUpper == "E")
-    {
-        emergencyStop();
-        if (IS_DEBUG)
-        {
-            Serial.println("STOPPED");
-        }
-    }
-    else if (cmdUpper == "STATUS")
-    {
-        sendStatus();
-    }
-    else if (cmdUpper == "PEDAL")
-    {
-        PEDALStream = !PEDALStream;
-        if (!PEDALStream && IS_DEBUG)
-        {
-            Serial.println("PEDAL:OFF");
-        }
-    }
-    else if (cmdUpper == "AUTO")
-    {
-        currentMode = AUTO;
-        if (IS_DEBUG)
-        {
-            Serial.println("MODE:AUTO");
-        }
-    }
-    else if (cmdUpper == "MANUAL")
-    {
-        if (ENABLE_MANUAL_MODE)
-        {
-            currentMode = MANUAL;
-            if (IS_DEBUG)
-            {
-                Serial.println("MODE:MANUAL");
-            }
-        }
-        else
-        {
-            if (IS_DEBUG)
-            {
-                Serial.println("ERR:MANUAL_DISABLED");
-            }
-            currentErrorCode = 0x01;
-        }
-    }
-    else if (currentMode == AUTO && cmd.startsWith("S:"))
-    {
-        // Seperate the numbers from the percent
-        int sepIndex = cmd.indexOf(':');
-        if (sepIndex != -1) 
-        {
-            cmd = cmd.substring(sepIndex + 1);
-        }
+    // toInt() returns 0 for non-numeric, so verify input is "0"
+    if (percent == 0 && cmd != "0") {
+      if (IS_DEBUG) {
+        Serial.println("ERR:UNKNOWN");
+      }
+      currentErrorCode = 0x02;
+    } else if (!isCalibrated) {
+      if (IS_DEBUG) {
+        Serial.println("ERR:NOT_CAL");
+      }
+      currentErrorCode = 0x03;
+    } else {
+      int curvedPercent = applyThrottleCurve(percent);
+      moveToThrottle(curvedPercent);
 
-        // throttle commands only work in AUTO mode
-        int percent = cmd.toInt();
-
-        // toInt() returns 0 for non-numeric, so verify input is "0"
-        if (percent == 0 && cmd != "0")
-        {
-            if (IS_DEBUG)
-            {
-                Serial.println("ERR:UNKNOWN");
-            }
-            currentErrorCode = 0x02;
-        }
-        else if (!isCalibrated)
-        {
-            if (IS_DEBUG)
-            {
-                Serial.println("ERR:NOT_CAL");
-            }
-            currentErrorCode = 0x03;
-        }
-        else
-        {
-            int curvedPercent = applyThrottleCurve(percent);
-            moveToThrottle(curvedPercent);
-
-            if (IS_DEBUG)
-            {
-                Serial.print("OK:");
-                Serial.println(curvedPercent);
-            }
-        }
+      if (IS_DEBUG) {
+        Serial.print("OK:");
+        Serial.println(curvedPercent);
+      }
     }
-    else if (cmd == "T") 
-    {
-        setManualMode(currentMode == AUTO);
+  } else if (cmd == "T") {
+    setManualMode(currentMode == AUTO);
+  } else if (cmd.startsWith("M:")) {
+    bool setManual = (cmd.substring(2).toInt() == 1);
+    setManualMode(setManual);
+  } else {
+    if (IS_DEBUG) {
+      Serial.println("ERR:MANUAL_MODE");
     }
-    else if (cmd.startsWith("M:")) {
-        bool setManual = (cmd.substring(2).toInt() == 1);
-        setManualMode(setManual);
-    }
-    else
-    {
-        if (IS_DEBUG)
-        {
-            Serial.println("ERR:MANUAL_MODE");
-        }
-        currentErrorCode = 0x04;
-    }
+    currentErrorCode = 0x04;
+  }
 }
 
 // Sets the system in and out of manual mode
-void setManualMode(bool isSetManual)
-{
-    if (isSetManual)
-    {
-        if (ENABLE_MANUAL_MODE)
-        {
-            currentMode = MANUAL;
-            if (IS_DEBUG)
-            {
-                Serial.println("MODE:MANUAL");
-            }
-        }
-        else
-        {
-            if (IS_DEBUG)
-            {
-                Serial.println("ERR:MANUAL_DISABLED");
-            }
-            currentErrorCode = 0x01;
-        }
+void setManualMode(bool isSetManual) {
+  if (isSetManual) {
+    if (ENABLE_MANUAL_MODE) {
+      currentMode = MANUAL;
+      if (IS_DEBUG) {
+        Serial.println("MODE:MANUAL");
+      }
+    } else {
+      if (IS_DEBUG) {
+        Serial.println("ERR:MANUAL_DISABLED");
+      }
+      currentErrorCode = 0x01;
     }
-    else 
-    {   
-        currentMode = AUTO;
-        if (IS_DEBUG)
-        {
-            Serial.println("MODE:AUTO");
-        }
+  } else {
+    currentMode = AUTO;
+    if (IS_DEBUG) {
+      Serial.println("MODE:AUTO");
     }
+  }
 }
 
 // enable stepper motor driver
-void enableMotor()
-{
-    digitalWrite(PIN_ENABLE, LOW);
-    isEnabled = true;
+void enableMotor() {
+  digitalWrite(PIN_ENABLE, LOW);
+  isEnabled = true;
 }
 
 // disable stepper motor driver
-void disableMotor()
-{
-    digitalWrite(PIN_ENABLE, HIGH);
-    isEnabled = false;
+void disableMotor() {
+  digitalWrite(PIN_ENABLE, HIGH);
+  isEnabled = false;
 }
 
 // move stepper to the given throttle percentage (0-100)
-void moveToThrottle(int percent)
-{
-    percent = constrain(percent, 0, 100);
-    currentThrottle = percent;
+void moveToThrottle(int percent) {
+  percent = constrain(percent, 0, 100);
+  long currentPos = stepper.currentPosition();
+  currentPos += percent > currentPercentTarget ? MORE_THROTTLE : LESS_THROTTLE;
 
-    currentPercentTarget = map(percent, 0, 100, throttleMin, throttleMax);
-}
+  currentThrottle = percent;
+  currentPercentTarget = percent;
+  isMoving = true;  
 
-void moveThrottle()
-{
-    float currentHallValue = analogRead(PIN_HALL_LEVER);
-
-    if (currentPercentTarget - currentHallValue > hallBuffer)
-    {
-        currentStep -= STEP_SIZE;
-    }
-    else if (currentPercentTarget - currentHallValue < -hallBuffer)
-    {
-        currentStep += STEP_SIZE;
-    }
-    else 
-    {
-        return;
-    }
-
-    enableMotor();
-    stepper.moveTo(currentStep);
+  enableMotor();
+  stepper.moveTo(currentPos);
 }
 
 // calibrate: set current position as idle (0%)
 // manually position throttle to idle before calling
-void calibrate()
-{
-    disableMotor();
-    stepper.setCurrentPosition(0);
-    currentThrottle = 0;
-    throttleMin = analogRead(PIN_HALL_LEVER);
-    throttleMax = throttleMin + 100;
-    currentStep = 0;
-    currentPercentTarget = 0;
-    isEmergencyStopped = false;
-    isCalibrated = true;
+void calibrate() {
+  disableMotor();
+  stepper.setCurrentPosition(0);
+  currentThrottle = 0;
+  const int THROTTLE_NOISE_BUFFER = 10;
+  const int THROTTLE_MIN_SAMPLE_SIZE = 10;
+  const int SAMPLE_DELAY = 20;
+  int throttleMinAvg = 0;
+  isMoving = false;
+  for (int i = 0; i < THROTTLE_MIN_SAMPLE_SIZE; i++) {
+    int val = analogRead(PIN_HALL_LEVER);
+    //if (abs(val - (throttleMinAvg / i)) > THROTTLE_NOISE_BUFFER && i != 0)
+    //{
+    //  i--;
+    //}
+    //else
+    //{
+    //  throttleMinAvg += val;
+    //}
+
+    throttleMinAvg += val;
+    delay(SAMPLE_DELAY);
+  }
+
+  throttleMin = throttleMinAvg / THROTTLE_MIN_SAMPLE_SIZE;
+  throttleMax = 580; // TODO: Need better way to find this
+  currentStep = 0;
+  currentPercentTarget = 0;
+  isEmergencyStopped = false;
+  isCalibrated = true;
 }
 
 // emergency stop: halt motor and disable driver
-void emergencyStop()
-{
-    // Set Stepper to go to 0
-    moveToThrottle(0);
-    isEmergencyStopped = true;
+void emergencyStop() {
+  // Set Stepper to go to 0
+  moveToThrottle(0);
+  isEmergencyStopped = true;
 }
 
 // get actual throttle percentage based on step position
-int getActualThrottle()
-{
-    long currentPos = analogRead(PIN_HALL_LEVER);
-    return map(currentPos, throttleMin, throttleMax, 0, 100);
+int getActualThrottle() {
+  long currentPos = analogRead(PIN_HALL_LEVER);
+  currentPos = map(currentPos, throttleMin, throttleMax, 0, 100);
+  return constrain(currentPos, 0, 100);
 }
 
 // send current system status over serial
-void sendStatus()
-{
-    int actualThrottle = getActualThrottle();
+void sendStatus() {
+  int actualThrottle = getActualThrottle();
 
-    if (IS_DEBUG)
-    { Serial.print("Requested Throttle:"); }
-    else 
-    { Serial.print("S:"); }
-    Serial.print(currentThrottle);
+  if (IS_DEBUG) {
+    Serial.print("Requested Throttle:");
+  } else {
+    Serial.print("S:");
+  }
+  Serial.print(currentThrottle);
 
-    if (IS_DEBUG)
-    { Serial.print(" | Actual Throttle: "); }
-    else 
-    { Serial.print(":"); }
-    Serial.print(actualThrottle);
+  if (IS_DEBUG) {
+    Serial.print(" | Actual Throttle: ");
+  } else {
+    Serial.print(":");
+  }
+  Serial.print(actualThrottle);
 
-    if (IS_DEBUG)
-    { Serial.print(" | In Emergency Mode: "); }
-    else 
-    { Serial.print(":"); }
-    Serial.print(isEmergencyStopped);
+  if (IS_DEBUG) {
+    Serial.print(" | In Emergency Mode: ");
+  } else {
+    Serial.print(":");
+  }
+  Serial.print(isEmergencyStopped);
 
-    if (IS_DEBUG) 
-    { Serial.println(""); }
+  if (IS_DEBUG) { Serial.println(""); }
 
-    if (IS_DEBUG)
-    { Serial.print("Is Enabled: "); }
-    else 
-    { Serial.print(":"); }
-    Serial.print(isEnabled);
+  if (IS_DEBUG) {
+    Serial.print("Is Enabled: ");
+  } else {
+    Serial.print(":");
+  }
+  Serial.print(isEnabled);
 
-    if (IS_DEBUG)
-    { Serial.print(" | Is Calibrated: "); }
-    else 
-    { Serial.print(":"); }
-    Serial.print(isCalibrated);
+  if (IS_DEBUG) {
+    Serial.print(" | Is Calibrated: ");
+  } else {
+    Serial.print(":");
+  }
+  Serial.print(isCalibrated);
 
-    if (IS_DEBUG)
-    { Serial.print(" | Is Manual Mode: "); }
-    else 
-    { Serial.print(":"); }
-    Serial.print(currentMode == MANUAL);
+  if (IS_DEBUG) {
+    Serial.print(" | Is Moving: ");
+    Serial.print(isMoving);
+  }
+
+  if (IS_DEBUG) {
+    Serial.print(" | Is Manual Mode: ");
+  } else {
+    Serial.print(":");
+  }
+  Serial.println(currentMode == MANUAL);
 }
