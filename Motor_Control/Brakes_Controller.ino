@@ -2,7 +2,8 @@
 
 Servo servo;
 
-int SERVO_PIN = 9;
+const int SERVO_PIN = 9;
+const int E_LIMITSWITCH = 2;
 
 // Servo pulse limits (µs)
 const int LOWER_BOUND  = 1000;
@@ -19,6 +20,9 @@ bool inManualMode          = false;       // True when in manual mode (This stop
 bool servoMoving           = false;       // True when the servo is moving to a targetPos 
 int targetPos              = currentPos;  // Defines where we want the servo to be
 unsigned long lastStepTime = 0;           // Defines the time since the last step of the servo motor
+bool isInEmergencyMode     = false;
+const byte NULL_ERRORCODE  = 00;
+byte currentErrorCode      = NULL_ERRORCODE; // 00 no error | 01 Serial recived while in emergency mode | 02 invalid serial input
 
 // Misc
 const byte ALL_ADDRESS   = 0x00;
@@ -29,12 +33,31 @@ void setup() {
   servo.attach(SERVO_PIN, LOWER_BOUND, HIGHER_BOUND);
   servo.writeMicroseconds(currentPos);
 
+  pinMode(E_LIMITSWITCH, INPUT_PULLUP);
+
   Serial.begin(BAUD_RATE);
 }
 
-void loop() {
-  handleSerial();
-  updateServo();
+void loop() 
+{
+  checkEStops();  // Checks to see if the pedal has been pressed (1st Priority since it handles emergency mode)
+  handleSerial(); // Check for any inputed serial (2nd priorty since it overrides how the update servo is going to act)
+  updateServo();  // Handle the servo's position (last priority since nothing else is left :) )
+}
+
+void checkEStops()
+{
+  if (!isInEmergencyMode && currentErrorCode != NULL_ERRORCODE)
+  {
+    enterEmergencyMode();
+    return;
+  }
+
+  int val = digitalRead(E_LIMITSWITCH);
+  if (val)
+  {
+    enterEmergencyMode();
+  }
 }
 
 // ===== Servo Control =====
@@ -128,8 +151,12 @@ void handleSerial() {
   cmd.trim();
 
   // Check to make sure the command was meant for this adruino
-  if (!(cmd.startsWith(String(ALL_ADDRESS)) || cmd.startsWith(String(LOCAL_ADDRESS))))
+  if (!(cmd.startsWith(String(ALL_ADDRESS)) || cmd.startsWith(String(LOCAL_ADDRESS))) || isInEmergencyMode)
   {
+    if (isInEmergencyMode)
+    {
+      currentErrorCode = 01;
+    }
     return;
   }
 
@@ -138,6 +165,11 @@ void handleSerial() {
   if (sepIndex != -1) 
   {
     cmd = cmd.substring(sepIndex + 1);
+  }
+  else
+  {
+    currentErrorCode = 02;
+    return;
   }
 
   // Remove case senstivity
@@ -149,7 +181,12 @@ void handleSerial() {
     int sepIndex = cmd.indexOf(':');
     if (sepIndex != -1) 
     {
-        cmd = cmd.substring(sepIndex + 1);
+      cmd = cmd.substring(sepIndex + 1);
+    }
+    else 
+    {
+      currentErrorCode = 02;
+      return;
     }
 
     // throttle commands only work in AUTO mode
@@ -158,7 +195,8 @@ void handleSerial() {
     // toInt() returns 0 for non-numeric, so verify input is "0"
     if (percent == 0 && cmd != "0")
     {
-        Serial.println("ERR:UNKNOWN");
+      currentErrorCode = 02;
+      return;
     }
     else 
     {
@@ -173,6 +211,12 @@ void handleSerial() {
     setManualMode(setManual);
   }
   else if (cmd == "E") {
-    setManualMode(true);
+    enterEmergencyMode();
   }
+}
+
+void enterEmergencyMode()
+{
+  isInEmergencyMode = true;
+  setManualMode(true);
 }
