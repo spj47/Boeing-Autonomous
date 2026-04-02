@@ -1,5 +1,9 @@
 #include <Servo.h>
 
+// Encoder Pins
+const int ENCODER_STEERING_WHEEL_PIN  = A0;
+const int ENCODER_STEERING_COLUMN_PIN = A1;
+
 // Servo data
 Servo servo;
 const int SERVO_PIN = 9;
@@ -9,26 +13,18 @@ const int STEP_SIZE_US  = 5;
 const int STEP_DELAY_MS = 3;
 
 // Servo pulse limits (µs)
-const int LOWER_BOUND  = 1000;
-const int HIGHER_BOUND = 2000;
-const int BOUND_DIFF   = HIGHER_BOUND - LOWER_BOUND;
+const int LOWER_BOUND  = 0;
+const int UPPER_BOUND = 2500;
 
 // Servo State Control
-int currentPos             = LOWER_BOUND; // initialize to lower bound
-bool servoMoving           = false;       // True when the servo is moving to a targetPos 
-int targetPos              = currentPos;  // Defines where we want the servo to be
+int currentPos             = 1250;        // initialize to middle of the bounds
+int targetAngle             = 50;  // Defines where we want the servo to be
 unsigned long lastStepTime = 0;           // Defines the time since the last step of the servo motor
 
-// Manual pins
-const int MANUAL_DRIVER_FORWARD_PIN  = 2;
-const int MANUAL_DRIVER_BACKWARD_PIN = 3;
-const int MANUAL_ENABLE_BUTTON       = 4;
-const int MANUAL_DISABLE_BUTTON      = 5;
-
 // Manual State Control
-bool inManualMode          = false;       // True when in manual mode (This stops the driver funciton from getting run when true!!)
-bool actuatingManual       = false;       // True when linear actuator is in motion to stop other inputs
-bool deactuatingManual     = false;       // True when linear actuator is in motion to stop other inputs
+bool inManualMode          = false;
+int manualOffset           = 0;
+float manualRatio          = 1;
 
 // Misc
 const byte ALL_ADDRESS   = 0x00;
@@ -40,15 +36,26 @@ const bool IS_DEBUG      = true;
 float debugTimer         = 0;
 float debugTime          = 1000;
 
+// Auto-Calibration
+int calibrationState = -1; // -1 Uncalibrated | 0 Calibrating Lower Bound | 1 Calibrating Upper Bound | 2 Calibrated
+
+int upperAngleBound;
+int lowerAngleBound;
+int angleBoundDiff;
+
+int currentCalibrationSteps;
+const int CALIBRATION_STEPS = 100;
+const int CALIBRATION_BUFFER = 5;
+const long CALIBRATION_SETTLE_TIME = 5000;
+
+// Calibration Meta Data
+int lastBoundValue;
+
 void setup() {
-  servo.attach(SERVO_PIN, LOWER_BOUND, HIGHER_BOUND);
+  servo.attach(SERVO_PIN, LOWER_BOUND, UPPER_BOUND);
   servo.writeMicroseconds(currentPos);
 
-  pinMode(MANUAL_DRIVER_FORWARD_PIN, OUTPUT);
-  pinMode(MANUAL_DRIVER_BACKWARD_PIN, OUTPUT);
-  pinMode(MANUAL_ENABLE_BUTTON, INPUT);
-  pinMode(MANUAL_DISABLE_BUTTON, INPUT);
-
+  InitCalibration();
   Serial.begin(BAUD_RATE);
 }
 
@@ -57,75 +64,127 @@ void loop() {
   {
     if (millis() - debugTimer > debugTime)
     {
-      Serial.print("Manual Actuating - ");
-      Serial.print(actuatingManual);
-      Serial.print(" | Manual Deactuating - ");
-      Serial.println(deactuatingManual);
-      Serial.print("Servo Engaged Button - ");
-      Serial.print(checkManual(MANUAL_ENABLE_BUTTON));
-      Serial.print(" | Servo Disengaged Button - ");
-      Serial.println(checkManual(MANUAL_DISABLE_BUTTON));
+      int steeringWheelAngle = getEncoderAngle(ENCODER_STEERING_WHEEL_PIN);
+      int steeringColumnAngle = getEncoderAngle(ENCODER_STEERING_COLUMN_PIN);
+
+      Serial.print("Calibration Status - ");
+      Serial.print(calibrationState);
+      Serial.print(" | Steering Wheel Angle - ");
+      Serial.print(steeringWheelAngle);
+      Serial.print(" | Steering Column Angle - ");
+      Serial.println(steeringColumnAngle);
+      Serial.print(" | In Manual Mode - ");
+      Serial.println(inManualMode);
       debugTimer = millis();
     }
   }
 
+  if (calibrationState != 2)
+  {
+    CalibrateSystem();
+    return;
+  }
+
   handleSerial();
-
-  if (actuatingManual)
-  {
-    actuatingManual = !checkManual(MANUAL_ENABLE_BUTTON);
-    return;
-  } else if (deactuatingManual)
-  {
-    deactuatingManual = !checkManual(MANUAL_DISABLE_BUTTON);
-    return;
-  }
-
-  if (!actuatingManual && !deactuatingManual)
-  {
-    digitalWrite(MANUAL_DRIVER_FORWARD_PIN, LOW);
-    digitalWrite(MANUAL_DRIVER_BACKWARD_PIN, LOW);
-  }
-
   updateServo();
 }
 
-bool checkManual(int pin)
+void InitCalibration()
 {
-    return digitalRead(pin);
+  calibrationState = -1;
+}
+
+void CalibrateSystem()
+{
+  switch (calibrationState)
+  {
+    case (-1): 
+      moveServo(LOWER_BOUND);
+      currentCalibrationSteps = 0;
+      calibrationState++;
+      break;
+    case (0): 
+      // Get the new Value
+      int c1 = getEncoderAngle(ENCODER_STEERING_COLUMN_PIN);
+      // Check if it is within buffer
+      if (abs(lastBoundValue - c1) < CALIBRATION_BUFFER)
+      {
+        currentCalibrationSteps++;
+      }
+      else 
+      {
+        currentCalibrationSteps = 0;
+      }
+      // Set calibrated Values
+      if (currentCalibrationSteps > CALIBRATION_STEPS)
+      {
+        lowerAngleBound = c1;
+        moveServo(UPPER_BOUND);
+        currentCalibrationSteps = 0;
+        calibrationState++;
+      }
+      break;
+    case (1): 
+      // Get the new Value
+      int c2 = getEncoderAngle(ENCODER_STEERING_COLUMN_PIN);
+      // Check if it is within buffer
+      if (abs(lastBoundValue - c2) < CALIBRATION_BUFFER)
+      {
+        currentCalibrationSteps++;
+      }
+      else 
+      {
+        currentCalibrationSteps = 0;
+      }
+      // Set calibrated Values
+      if (currentCalibrationSteps > CALIBRATION_STEPS)
+      {
+        upperAngleBound = c2;
+        angleBoundDiff = upperAngleBound - lowerAngleBound;
+        calibrationState++;
+      }
+      break;
+  }
 }
 
 // ===== Servo Control =====
 
 // Use to request the servo to move 
 void moveServo(int target) {
-  targetPos = constrain(target, LOWER_BOUND, HIGHER_BOUND);
-  servoMoving = true;
+  targetAngle = constrain(target, lowerAngleBound, upperAngleBound);
 }
 
 // Steps toward the current target
 void updateServo() {
-  if (!servoMoving) return;
-
   unsigned long now = millis();
-  if (now - lastStepTime < STEP_DELAY_MS) return;
 
+  // Step only after a STEP_DELAY_MS amount of time has pssed
+  if (now - lastStepTime < STEP_DELAY_MS) return;
   lastStepTime = now;
 
-  if (currentPos == targetPos) {
-    servoMoving = false;
+  // Get the current real angle of the steering coloun
+  int currentAngle = getEncoderAngle(ENCODER_STEERING_COLUMN_PIN);
+
+  // Check to see if the angle is within the buffer of the target
+  if (abs(currentAngle - targetAngle) < CALIBRATION_BUFFER) {
     return;
   }
 
-  if (targetPos > currentPos) {
+  // Inch the motor in the direction of the target
+  if (targetAngle > currentAngle) {
     currentPos += STEP_SIZE_US;
-    if (currentPos > targetPos) currentPos = targetPos;
   } else {
     currentPos -= STEP_SIZE_US;
-    if (currentPos < targetPos) currentPos = targetPos;
   }
 
+  // Write the new PWM to the servo
   servo.writeMicroseconds(currentPos);
+}
+
+int getEncoderAngle(int pin)
+{
+  int rawValue = analogRead(pin);
+  return 360 * pin / 1023;
 }
 
 // ===== PUBLIC API =====
@@ -142,33 +201,30 @@ void driveServo(int percent) {
   if (inManualMode) return;
 
   percent = constrain(percent, 0, 100);
-  int target = LOWER_BOUND + (BOUND_DIFF * percent) / 100;
+
+  // Convert the percent to angles
+  int target = lowerAngleBound + (angleBoundDiff * percent) / 100;
   moveServo(target);
 }
 
 void toggleManualMode() {
-  if (actuatingManual || deactuatingManual) return;
-
   inManualMode = !inManualMode;
   setManualMode(inManualMode);
 }
 
 void setManualMode(bool isManual) {
-  if (actuatingManual || deactuatingManual) return;
-  
   inManualMode = isManual;
   if (inManualMode) enterManualMode();
   else exitManualMode();
 }
 
 void enterManualMode() {
-  actuatingManual = true;
-  digitalWrite(MANUAL_DRIVER_FORWARD_PIN, HIGH);
+  inManualMode = true;
+  manualOffset = getEncoderAngle(ENCODER_STEERING_WHEEL_PIN);
 }
 
 void exitManualMode() {
-  deactuatingManual = true;
-  digitalWrite(MANUAL_DRIVER_BACKWARD_PIN, HIGH);
+  inManualMode = false;
 }
 
 
