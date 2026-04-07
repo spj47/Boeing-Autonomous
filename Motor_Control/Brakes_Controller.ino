@@ -40,6 +40,9 @@ void setup() {
 
 void loop() 
 {
+  Serial.println(digitalRead(E_LIMITSWITCH));
+  return;
+
   checkEStops();  // Checks to see if the pedal has been pressed (1st Priority since it handles emergency mode)
   handleSerial(); // Check for any inputed serial (2nd priorty since it overrides how the update servo is going to act)
   updateServo();  // Handle the servo's position (last priority since nothing else is left :) )
