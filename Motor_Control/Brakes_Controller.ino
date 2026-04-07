@@ -3,22 +3,27 @@
 Servo servo;
 
 const int SERVO_PIN = 9;
-const int E_LIMITSWITCH = 2;
+const int E_LIMITSWITCH_PIN = 2;
+const int CURRENT_SENSE_PIN = A0;
 
 // Servo pulse limits (µs)
-const int LOWER_BOUND  = 1000;
-const int HIGHER_BOUND = 2000;
-const int BOUND_DIFF   = HIGHER_BOUND - LOWER_BOUND;
+const int LOWER_BOUND  = 500;
+const int HIGHER_BOUND = 2500;
+
+// Current Target handling
+const int LOWER_CURRENT_BOUND = 170; // 5A/30A * 1023
+const int UPPER_CURRENT_BOUND = 682; // 20A/30A * 1023
+const int CURRENT_BOUND_DIFF = UPPER_CURRENT_BOUND - LOWER_CURRENT_BOUND;
+const int CURRENT_TARGET_BUFFER = 10;
 
 // Motion handling
 const int STEP_SIZE_US  = 5;
 const int STEP_DELAY_MS = 3;
 
 // State control
-int currentPos             = LOWER_BOUND; // initialize to lower bound
+int currentStepPos             = LOWER_BOUND; // initialize to lower bound
 bool inManualMode          = false;       // True when in manual mode (This stops the driver funciton from getting run when true!!)
-bool servoMoving           = false;       // True when the servo is moving to a targetPos 
-int targetPos              = currentPos;  // Defines where we want the servo to be
+int targetCurrent              = 50;  // Defines where we want the servo to be
 unsigned long lastStepTime = 0;           // Defines the time since the last step of the servo motor
 bool isInEmergencyMode     = false;
 const byte NULL_ERRORCODE  = 00;
@@ -31,9 +36,10 @@ const int BAUD_RATE      = 9600;
 
 void setup() {
   servo.attach(SERVO_PIN, LOWER_BOUND, HIGHER_BOUND);
-  servo.writeMicroseconds(currentPos);
+  servo.writeMicroseconds(currentStepPos);
 
-  pinMode(E_LIMITSWITCH, INPUT_PULLUP);
+  pinMode(E_LIMITSWITCH_PIN, INPUT_PULLUP);
+  pinMode(CURRENT_SENSE_PIN, INPUT);
 
   Serial.begin(BAUD_RATE);
 }
@@ -53,7 +59,7 @@ void checkEStops()
     return;
   }
 
-  int val = digitalRead(E_LIMITSWITCH);
+  int val = digitalRead(E_LIMITSWITCH_PIN);
   if (val)
   {
     enterEmergencyMode();
@@ -64,8 +70,7 @@ void checkEStops()
 
 // Use to request the servo to move 
 void moveServo(int target) {
-  targetPos = constrain(target, LOWER_BOUND, HIGHER_BOUND);
-  servoMoving = true;
+  targetCurrent = constrain(target, LOWER_CURRENT_BOUND, UPPER_CURRENT_BOUND);
 }
 
 // Steps toward the current target
@@ -76,38 +81,33 @@ void updateServo() {
   if (now - lastStepTime < STEP_DELAY_MS) return;
 
   lastStepTime = now;
+  int cCurrent = analogRead(CURRENT_SENSE_PIN);
 
-  if (currentPos == targetPos) {
-    servoMoving = false;
-    return;
+  if (abs(cCurrent - targetCurrent) < CURRENT_TARGET_BUFFER) {
+    // Close enough to target; Do nothing
+  }
+  else // Not at target yet
+  {
+    if (targetCurrent > cCurrent) 
+    {
+      currentStepPos += STEP_SIZE_US;
+    } 
+    else 
+    {
+      currentStepPos -= STEP_SIZE_US;
+    }
   }
 
-  if (targetPos > currentPos) {
-    currentPos += STEP_SIZE_US;
-    if (currentPos > targetPos) currentPos = targetPos;
-  } else {
-    currentPos -= STEP_SIZE_US;
-    if (currentPos < targetPos) currentPos = targetPos;
-  }
-
-  servo.writeMicroseconds(currentPos);
+  servo.writeMicroseconds(currentStepPos);
 }
 
 // ===== PUBLIC API =====
 
 void driveServo(int percent) {
-  /*
-    This function is used to drive the servo motor from an external master by converting the input percent to a target for the servo motor
-    This funciton instantly returns in manual mode to avoid any issues
-
-    Args:
-      percent (int): defines the position of the motor as a percentage from the LOWER_BOUND to the UPPER_BOUND
-  */
-
   if (inManualMode) return;
 
   percent = constrain(percent, 0, 100);
-  int target = LOWER_BOUND + (BOUND_DIFF * percent) / 100;
+  int target = LOWER_CURRENT_BOUND + (CURRENT_BOUND_DIFF * percent) / 100;
   moveServo(target);
 }
 
