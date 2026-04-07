@@ -13,12 +13,12 @@ const int STEP_SIZE_US  = 5;
 const int STEP_DELAY_MS = 3;
 
 // Servo pulse limits (µs)
-const int LOWER_BOUND  = 0;
-const int UPPER_BOUND = 2500;
+const int LOWER_BOUND  = 1000;
+const int UPPER_BOUND = 2000;
 
 // Servo State Control
 int currentPos             = 1250;        // initialize to middle of the bounds
-int targetAngle             = 50;  // Defines where we want the servo to be
+int targetAngle            = 50;          // Defines where we want the servo to be
 unsigned long lastStepTime = 0;           // Defines the time since the last step of the servo motor
 
 // Manual State Control
@@ -33,6 +33,7 @@ const int BAUD_RATE      = 9600;
 
 // Debug
 const bool IS_DEBUG      = true;
+const bool IS_DEBUG_CALIBRATION = true;
 float debugTimer         = 0;
 float debugTime          = 1000;
 
@@ -43,8 +44,8 @@ int upperAngleBound;
 int lowerAngleBound;
 int angleBoundDiff;
 
-int currentCalibrationSteps;
-const int CALIBRATION_STEPS = 100;
+long currentCalibrationSteps;
+const long CALIBRATION_STEPS = 20000;
 const int CALIBRATION_BUFFER = 5;
 const long CALIBRATION_SETTLE_TIME = 5000;
 
@@ -53,13 +54,19 @@ int lastBoundValue;
 
 void setup() {
   servo.attach(SERVO_PIN, LOWER_BOUND, UPPER_BOUND);
-  servo.writeMicroseconds(currentPos);
+  servo.writeMicroseconds(LOWER_BOUND);
+
+  pinMode(SERVO_PIN, OUTPUT);
+  pinMode(ENCODER_STEERING_COLUMN_PIN, INPUT);
 
   InitCalibration();
   Serial.begin(BAUD_RATE);
 }
 
 void loop() {
+  servo.writeMicroseconds(0);
+  return;
+
   if (IS_DEBUG)
   {
     if (millis() - debugTimer > debugTime)
@@ -72,9 +79,22 @@ void loop() {
       Serial.print(" | Steering Wheel Angle - ");
       Serial.print(steeringWheelAngle);
       Serial.print(" | Steering Column Angle - ");
-      Serial.println(steeringColumnAngle);
+      Serial.print(steeringColumnAngle);
       Serial.print(" | In Manual Mode - ");
       Serial.println(inManualMode);
+
+      if (IS_DEBUG_CALIBRATION)
+      {
+        Serial.print("Calibration Steps - ");
+        Serial.print(currentCalibrationSteps);
+        Serial.print(" | Last Value - ");
+        Serial.print(lastBoundValue);
+        Serial.print(" | Lower Bound -  ");
+        Serial.print(lowerAngleBound);
+        Serial.print(" | Upper Bound - ");
+        Serial.println(upperAngleBound);
+      }
+      
       debugTimer = millis();
     }
   }
@@ -85,8 +105,8 @@ void loop() {
     return;
   }
 
-  handleSerial();
   updateServo();
+  handleSerial();
 }
 
 void InitCalibration()
@@ -96,16 +116,17 @@ void InitCalibration()
 
 void CalibrateSystem()
 {
+  // Get the new Value
+  int c1 = getEncoderAngle(ENCODER_STEERING_COLUMN_PIN);
   switch (calibrationState)
   {
     case (-1): 
-      moveServo(LOWER_BOUND);
+      servo.writeMicroseconds(LOWER_BOUND);
       currentCalibrationSteps = 0;
+      lastBoundValue = c1;
       calibrationState++;
       break;
     case (0): 
-      // Get the new Value
-      int c1 = getEncoderAngle(ENCODER_STEERING_COLUMN_PIN);
       // Check if it is within buffer
       if (abs(lastBoundValue - c1) < CALIBRATION_BUFFER)
       {
@@ -113,35 +134,37 @@ void CalibrateSystem()
       }
       else 
       {
+        lastBoundValue = c1;
         currentCalibrationSteps = 0;
       }
+
       // Set calibrated Values
       if (currentCalibrationSteps > CALIBRATION_STEPS)
       {
         lowerAngleBound = c1;
-        moveServo(UPPER_BOUND);
+        servo.writeMicroseconds(UPPER_BOUND);
         currentCalibrationSteps = 0;
         calibrationState++;
       }
       break;
     case (1): 
-      // Get the new Value
-      int c2 = getEncoderAngle(ENCODER_STEERING_COLUMN_PIN);
       // Check if it is within buffer
-      if (abs(lastBoundValue - c2) < CALIBRATION_BUFFER)
+      if (abs(lastBoundValue - c1) < CALIBRATION_BUFFER)
       {
         currentCalibrationSteps++;
       }
       else 
       {
+        lastBoundValue = c1;
         currentCalibrationSteps = 0;
       }
       // Set calibrated Values
       if (currentCalibrationSteps > CALIBRATION_STEPS)
       {
-        upperAngleBound = c2;
+        upperAngleBound = c1;
         angleBoundDiff = upperAngleBound - lowerAngleBound;
         calibrationState++;
+        driveServo(50); // Go to middle when done
       }
       break;
   }
@@ -184,20 +207,11 @@ void updateServo() {
 int getEncoderAngle(int pin)
 {
   int rawValue = analogRead(pin);
-  return 360 * pin / 1023;
+  return map(rawValue, 0, 1023, 0, 360);
 }
 
-// ===== PUBLIC API =====
-
-void driveServo(int percent) {
-  /*
-    This function is used to drive the servo motor from an external master by converting the input percent to a target for the servo motor
-    This funciton instantly returns in manual mode to avoid any issues
-
-    Args:
-      percent (int): defines the position of the motor as a percentage from the LOWER_BOUND to the UPPER_BOUND
-  */
-
+void driveServo(int percent) 
+{
   if (inManualMode) return;
 
   percent = constrain(percent, 0, 100);
