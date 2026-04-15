@@ -13,8 +13,9 @@ const int STEP_SIZE_US  = 5;
 const int STEP_DELAY_MS = 3;
 
 // Servo pulse limits (µs)
+const float MIDPOINTPERCENT = 0.69;
 const int LOWER_BOUND  = 1000;
-const int UPPER_BOUND = 2000;
+const int UPPER_BOUND = 2500;
 
 // Servo State Control
 int currentPos             = 1250;        // initialize to middle of the bounds
@@ -22,7 +23,7 @@ int targetAngle            = 50;          // Defines where we want the servo to 
 unsigned long lastStepTime = 0;           // Defines the time since the last step of the servo motor
 
 // Manual State Control
-bool inManualMode          = false;
+bool inManualMode          = true;
 int manualOffset           = 0;
 float manualRatio          = 1;
 
@@ -33,7 +34,8 @@ const int BAUD_RATE      = 9600;
 
 // Debug
 const bool IS_DEBUG      = true;
-const bool IS_DEBUG_CALIBRATION = true;
+const bool IS_DEBUG_CALIBRATION = false;
+const bool IS_DEBUG_MANUAL = true;
 float debugTimer         = 0;
 float debugTime          = 1000;
 
@@ -42,6 +44,7 @@ int calibrationState = -1; // -1 Uncalibrated | 0 Calibrating Lower Bound | 1 Ca
 
 int upperAngleBound;
 int lowerAngleBound;
+int centerBound;
 int angleBoundDiff;
 
 long currentCalibrationSteps;
@@ -54,19 +57,21 @@ int lastBoundValue;
 
 void setup() {
   servo.attach(SERVO_PIN, LOWER_BOUND, UPPER_BOUND);
-  servo.writeMicroseconds(LOWER_BOUND);
 
   pinMode(SERVO_PIN, OUTPUT);
+  pinMode(ENCODER_STEERING_WHEEL_PIN, INPUT);
   pinMode(ENCODER_STEERING_COLUMN_PIN, INPUT);
 
   InitCalibration();
+  if (inManualMode)
+  {
+    enterManualMode();
+  }
+
   Serial.begin(BAUD_RATE);
 }
 
 void loop() {
-  servo.writeMicroseconds(0);
-  return;
-
   if (IS_DEBUG)
   {
     if (millis() - debugTimer > debugTime)
@@ -94,6 +99,16 @@ void loop() {
         Serial.print(" | Upper Bound - ");
         Serial.println(upperAngleBound);
       }
+
+      if (IS_DEBUG_MANUAL)
+      {
+        Serial.print("Steering Angle - ");
+        Serial.print(steeringWheelAngle);
+        Serial.print(" | Steering ColumnAngle ");
+        Serial.print(steeringColumnAngle);
+        Serial.print(" | Steering Wheel Offset -  ");
+        Serial.println(steeringWheelAngle - manualOffset);
+      }
       
       debugTimer = millis();
     }
@@ -103,6 +118,25 @@ void loop() {
   {
     CalibrateSystem();
     return;
+  }
+
+  if (inManualMode)
+  {
+    int steeringAngle = getEncoderAngle(ENCODER_STEERING_WHEEL_PIN);
+    int coloumnAngle = getEncoderAngle(ENCODER_STEERING_COLUMN_PIN);
+
+    if (abs(steeringAngle - manualOffset) > CALIBRATION_BUFFER)
+    {
+      if (steeringAngle > manualOffset)
+      {
+        targetAngle--;
+      }
+      else 
+      {
+        targetAngle++;        
+      }
+      moveServo(targetAngle);
+    }
   }
 
   updateServo();
@@ -164,6 +198,7 @@ void CalibrateSystem()
         upperAngleBound = c1;
         angleBoundDiff = upperAngleBound - lowerAngleBound;
         calibrationState++;
+        centerBound = angleBoundDiff * MIDPOINTPERCENT + lowerAngleBound;
         driveServo(50); // Go to middle when done
       }
       break;
@@ -174,7 +209,21 @@ void CalibrateSystem()
 
 // Use to request the servo to move 
 void moveServo(int target) {
-  targetAngle = constrain(target, lowerAngleBound, upperAngleBound);
+  targetAngle = curveAngle(target);
+}
+
+int curveAngle(int rawAngle)
+{
+  rawAngle = constrain(rawAngle, lowerAngleBound, upperAngleBound);
+  int rawMidPoint = lowerAngleBound + (angleBoundDiff / 2);
+  if (rawAngle < MIDPOINTPERCENT)
+  {
+    return map(rawAngle, lowerAngleBound, rawMidPoint, lowerAngleBound, centerBound);
+  }
+  else
+  {
+    return map(rawAngle, rawMidPoint, upperAngleBound, centerBound, upperAngleBound);
+  }
 }
 
 // Steps toward the current target

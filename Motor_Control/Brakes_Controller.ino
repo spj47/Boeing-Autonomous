@@ -1,13 +1,15 @@
 #include <Servo.h>
+#include <ACS712.h>
 
 Servo servo;
 
-const int SERVO_PIN = 9;
-const int E_LIMITSWITCH = 2;
+const int SERVO_PIN = 2;
+const int E_LIMITSWITCH = 3;
+ACS712 ACS(A0, 5.0, 1023, 100);
 
 // Servo pulse limits (µs)
 const int LOWER_BOUND  = 1000;
-const int HIGHER_BOUND = 2000;
+const int HIGHER_BOUND = 2500;
 const int BOUND_DIFF   = HIGHER_BOUND - LOWER_BOUND;
 
 // Motion handling
@@ -32,14 +34,13 @@ const int BAUD_RATE      = 9600;
 void setup() {
   servo.attach(SERVO_PIN, LOWER_BOUND, HIGHER_BOUND);
   servo.writeMicroseconds(currentPos);
-
   pinMode(E_LIMITSWITCH, INPUT_PULLUP);
 
   Serial.begin(BAUD_RATE);
 }
 
-void loop() 
-{
+int a = 2000; // 1950 - 2100
+void loop() {
   checkEStops();  // Checks to see if the pedal has been pressed (1st Priority since it handles emergency mode)
   handleSerial(); // Check for any inputed serial (2nd priorty since it overrides how the update servo is going to act)
   updateServo();  // Handle the servo's position (last priority since nothing else is left :) )

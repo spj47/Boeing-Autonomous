@@ -71,9 +71,11 @@ long currentStep;
 float currentPercentTarget;
 bool isEmergencyStopped;
 byte currentErrorCode = 0x00;
+int correctCheckCount = 0;
+const int CORRECTCOUNT = 10;
 
 // ----> MUST BE <FALSE> IN ALL CASES THAT ARE NOT ISOLATED TESTS<-------
-const bool IS_DEBUG = false;
+const bool IS_DEBUG = true;
 // ----> MUST BE <FALSE> IN ALL CASES THAT ARE NOT ISOLATED TESTS<-------
 
 AccelStepper stepper(AccelStepper::DRIVER, PIN_STEP, PIN_DIR);
@@ -147,12 +149,21 @@ void loop() {
   }
 
   // Check if the motor is moving and if it reached its destination
-  if (abs(currentPercentTarget - getActualThrottle()) < hallBuffer)
+  int err = abs(currentPercentTarget - getActualThrottle());
+  if (err < 0) err *= -1;
+  if (err < hallBuffer)
   {
-    stepper.stop();
-    long currentPos = stepper.currentPosition();
-    stepper.setCurrentPosition(currentPos);
+    if (correctCheckCount > CORRECTCOUNT)
+    {
+      stepper.stop();
+      long currentPos = stepper.currentPosition();
+      isMoving = false;
+      stepper.setCurrentPosition(currentPos);
+    }
+
+    correctCheckCount++;
   }
+
 
   // run stepper (non-b locking, must be called frequently)
   if (isEnabled) {
@@ -389,6 +400,7 @@ void moveToThrottle(int percent) {
   currentThrottle = percent;
   currentPercentTarget = percent;
   isMoving = true;  
+  correctCheckCount = 0;
 
   enableMotor();
   stepper.moveTo(currentPos);
