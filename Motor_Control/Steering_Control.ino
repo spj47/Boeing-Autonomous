@@ -2,7 +2,6 @@
 
 // Encoder Pins
 const int ENCODER_STEERING_WHEEL_PIN  = A0;
-const int ENCODER_STEERING_COLUMN_PIN = A1;
 
 // Servo data
 Servo servo;
@@ -13,19 +12,23 @@ const int STEP_SIZE_US  = 5;
 const int STEP_DELAY_MS = 3;
 
 // Servo pulse limits (µs)
-const float MIDPOINTPERCENT = 0.69;
-const int LOWER_BOUND  = 1000;
-const int UPPER_BOUND = 2500;
+const int SERVO_LEFT_US   = 1000;
+const int SERVO_CENTER_US = 2035;
+const int SERVO_RIGHT_US  = 2500;
+
+const int LOWER_BOUND = SERVO_LEFT_US;
+const int HIGHER_BOUND = SERVO_RIGHT_US;
 
 // Servo State Control
-int currentPos             = 1250;        // initialize to middle of the bounds
-int targetAngle            = 50;          // Defines where we want the servo to be
+int currentPos             = SERVO_CENTER_US; // initialize to lower bound
+bool servoMoving           = false;       // True when the servo is moving to a targetPos
+int targetPos              = SERVO_CENTER_US;  // Defines where we want the servo to be
 unsigned long lastStepTime = 0;           // Defines the time since the last step of the servo motor
 
 // Manual State Control
-bool inManualMode          = true;
-int manualOffset           = 0;
-float manualRatio          = 1;
+bool inManualMode = true;                // True when in manual mode
+int manualOffset = 0;
+int lastVal;
 
 // Misc
 const byte ALL_ADDRESS   = 0x00;
@@ -33,224 +36,124 @@ const byte LOCAL_ADDRESS = 0x01;
 const int BAUD_RATE      = 9600;
 
 // Debug
-const bool IS_DEBUG      = true;
-const bool IS_DEBUG_CALIBRATION = false;
-const bool IS_DEBUG_MANUAL = true;
-float debugTimer         = 0;
-float debugTime          = 1000;
-
-// Auto-Calibration
-int calibrationState = -1; // -1 Uncalibrated | 0 Calibrating Lower Bound | 1 Calibrating Upper Bound | 2 Calibrated
-
-int upperAngleBound;
-int lowerAngleBound;
-int centerBound;
-int angleBoundDiff;
-
-long currentCalibrationSteps;
-const long CALIBRATION_STEPS = 20000;
-const int CALIBRATION_BUFFER = 5;
-const long CALIBRATION_SETTLE_TIME = 5000;
-
-// Calibration Meta Data
-int lastBoundValue;
+const bool IS_DEBUG = false;
+float debugTimer = 0;
+float debugTime  = 1000;
 
 void setup() {
-  servo.attach(SERVO_PIN, LOWER_BOUND, UPPER_BOUND);
-
-  pinMode(SERVO_PIN, OUTPUT);
-  pinMode(ENCODER_STEERING_WHEEL_PIN, INPUT);
-  pinMode(ENCODER_STEERING_COLUMN_PIN, INPUT);
-
-  InitCalibration();
-  if (inManualMode)
-  {
-    enterManualMode();
-  }
+  servo.attach(SERVO_PIN, LOWER_BOUND, HIGHER_BOUND);
+  servo.writeMicroseconds(currentPos);
 
   Serial.begin(BAUD_RATE);
 }
 
 void loop() {
-  if (IS_DEBUG)
-  {
-    if (millis() - debugTimer > debugTime)
-    {
-      int steeringWheelAngle = getEncoderAngle(ENCODER_STEERING_WHEEL_PIN);
-      int steeringColumnAngle = getEncoderAngle(ENCODER_STEERING_COLUMN_PIN);
-
-      Serial.print("Calibration Status - ");
-      Serial.print(calibrationState);
-      Serial.print(" | Steering Wheel Angle - ");
-      Serial.print(steeringWheelAngle);
-      Serial.print(" | Steering Column Angle - ");
-      Serial.print(steeringColumnAngle);
-      Serial.print(" | In Manual Mode - ");
-      Serial.println(inManualMode);
-
-      if (IS_DEBUG_CALIBRATION)
-      {
-        Serial.print("Calibration Steps - ");
-        Serial.print(currentCalibrationSteps);
-        Serial.print(" | Last Value - ");
-        Serial.print(lastBoundValue);
-        Serial.print(" | Lower Bound -  ");
-        Serial.print(lowerAngleBound);
-        Serial.print(" | Upper Bound - ");
-        Serial.println(upperAngleBound);
-      }
-
-      if (IS_DEBUG_MANUAL)
-      {
-        Serial.print("Steering Angle - ");
-        Serial.print(steeringWheelAngle);
-        Serial.print(" | Steering ColumnAngle ");
-        Serial.print(steeringColumnAngle);
-        Serial.print(" | Steering Wheel Offset -  ");
-        Serial.println(steeringWheelAngle - manualOffset);
-      }
-      
-      debugTimer = millis();
-    }
-  }
-
-  if (calibrationState != 2)
-  {
-    CalibrateSystem();
-    return;
-  }
-
   if (inManualMode)
   {
-    int steeringAngle = getEncoderAngle(ENCODER_STEERING_WHEEL_PIN);
-    int coloumnAngle = getEncoderAngle(ENCODER_STEERING_COLUMN_PIN);
-
-    if (abs(steeringAngle - manualOffset) > CALIBRATION_BUFFER)
+    int angle = getEncoderAngle(ENCODER_STEERING_WHEEL_PIN);
+    int servoPulse = angleToServo(angle);
+    if (!isLoop(angle))
     {
-      if (steeringAngle > manualOffset)
-      {
-        targetAngle--;
-      }
-      else 
-      {
-        targetAngle++;        
-      }
-      moveServo(targetAngle);
+      lastVal = angle;
+      moveServo(servoPulse);
     }
   }
 
-  updateServo();
   handleSerial();
+  updateServo();
 }
 
-void InitCalibration()
+int angleToServo(int angle)
 {
-  calibrationState = -1;
+  return map(angle, 0, 360, LOWER_BOUND, HIGHER_BOUND);
 }
 
-void CalibrateSystem()
+bool isLoop(int value)
 {
-  // Get the new Value
-  int c1 = getEncoderAngle(ENCODER_STEERING_COLUMN_PIN);
-  switch (calibrationState)
-  {
-    case (-1): 
-      servo.writeMicroseconds(LOWER_BOUND);
-      currentCalibrationSteps = 0;
-      lastBoundValue = c1;
-      calibrationState++;
-      break;
-    case (0): 
-      // Check if it is within buffer
-      if (abs(lastBoundValue - c1) < CALIBRATION_BUFFER)
-      {
-        currentCalibrationSteps++;
-      }
-      else 
-      {
-        lastBoundValue = c1;
-        currentCalibrationSteps = 0;
-      }
+  int diff = value - lastVal;
+  if (diff < 0) diff *= -1;
 
-      // Set calibrated Values
-      if (currentCalibrationSteps > CALIBRATION_STEPS)
-      {
-        lowerAngleBound = c1;
-        servo.writeMicroseconds(UPPER_BOUND);
-        currentCalibrationSteps = 0;
-        calibrationState++;
-      }
-      break;
-    case (1): 
-      // Check if it is within buffer
-      if (abs(lastBoundValue - c1) < CALIBRATION_BUFFER)
-      {
-        currentCalibrationSteps++;
-      }
-      else 
-      {
-        lastBoundValue = c1;
-        currentCalibrationSteps = 0;
-      }
-      // Set calibrated Values
-      if (currentCalibrationSteps > CALIBRATION_STEPS)
-      {
-        upperAngleBound = c1;
-        angleBoundDiff = upperAngleBound - lowerAngleBound;
-        calibrationState++;
-        centerBound = angleBoundDiff * MIDPOINTPERCENT + lowerAngleBound;
-        driveServo(50); // Go to middle when done
-      }
-      break;
-  }
+  return diff > 30;
 }
 
 // ===== Servo Control =====
 
-// Use to request the servo to move 
+// Use to request the servo to move
 void moveServo(int target) {
-  targetAngle = curveAngle(target);
-}
-
-int curveAngle(int rawAngle)
-{
-  rawAngle = constrain(rawAngle, lowerAngleBound, upperAngleBound);
-  int rawMidPoint = lowerAngleBound + (angleBoundDiff / 2);
-  if (rawAngle < MIDPOINTPERCENT)
-  {
-    return map(rawAngle, lowerAngleBound, rawMidPoint, lowerAngleBound, centerBound);
-  }
-  else
-  {
-    return map(rawAngle, rawMidPoint, upperAngleBound, centerBound, upperAngleBound);
-  }
+  targetPos = constrain(target, LOWER_BOUND, HIGHER_BOUND);
+  servoMoving = true;
 }
 
 // Steps toward the current target
 void updateServo() {
-  unsigned long now = millis();
+  if (!servoMoving) return;
 
-  // Step only after a STEP_DELAY_MS amount of time has pssed
+  unsigned long now = millis();
   if (now - lastStepTime < STEP_DELAY_MS) return;
+
   lastStepTime = now;
 
-  // Get the current real angle of the steering coloun
-  int currentAngle = getEncoderAngle(ENCODER_STEERING_COLUMN_PIN);
-
-  // Check to see if the angle is within the buffer of the target
-  if (abs(currentAngle - targetAngle) < CALIBRATION_BUFFER) {
+  if (currentPos == targetPos) {
+    servoMoving = false;
     return;
   }
 
-  // Inch the motor in the direction of the target
-  if (targetAngle > currentAngle) {
+  if (targetPos > currentPos) {
     currentPos += STEP_SIZE_US;
+    if (currentPos > targetPos) currentPos = targetPos;
   } else {
     currentPos -= STEP_SIZE_US;
+    if (currentPos < targetPos) currentPos = targetPos;
   }
 
-  // Write the new PWM to the servo
   servo.writeMicroseconds(currentPos);
+}
+
+// Convert a 0 to 100 steering percent into a calibrated pulse width
+// 0 = full left
+// 50 = straight
+// 100 = full right
+int percentToPulseUs(int percent) {
+  percent = constrain(percent, 0, 100);
+
+  if (percent <= 50) {
+    return map(percent, 0, 50, SERVO_LEFT_US, SERVO_CENTER_US);
+  }
+
+  return map(percent, 50, 100, SERVO_CENTER_US, SERVO_RIGHT_US);
+}
+
+// ===== PUBLIC API =====
+
+void driveServo(int percent) {
+  /*
+    This function is used to drive the servo motor from an external master by converting
+    the input percent to a target for the servo motor.
+    This function instantly returns in manual mode to avoid any issues.
+
+    Args:
+      percent (int): defines the position of the motor as a percentage
+                     from the LOWER_BOUND to the UPPER_BOUND
+  */
+
+  if (inManualMode) return;
+
+  int target = percentToPulseUs(percent);
+  moveServo(target);
+}
+
+void toggleManualMode() {
+  inManualMode = !inManualMode;
+}
+
+void setManualMode(bool isManual) {
+  inManualMode = isManual;
+}
+
+void enterManualMode()
+{
+  inManualMode = true;
+  manualOffset = getEncoderAngle(ENCODER_STEERING_WHEEL_PIN);  
 }
 
 int getEncoderAngle(int pin)
@@ -259,109 +162,98 @@ int getEncoderAngle(int pin)
   return map(rawValue, 0, 1023, 0, 360);
 }
 
-void driveServo(int percent) 
-{
-  if (inManualMode) return;
-
-  percent = constrain(percent, 0, 100);
-
-  // Convert the percent to angles
-  int target = lowerAngleBound + (angleBoundDiff * percent) / 100;
-  moveServo(target);
+void centerServo() {
+  moveServo(SERVO_CENTER_US);
 }
-
-void toggleManualMode() {
-  inManualMode = !inManualMode;
-  setManualMode(inManualMode);
-}
-
-void setManualMode(bool isManual) {
-  inManualMode = isManual;
-  if (inManualMode) enterManualMode();
-  else exitManualMode();
-}
-
-void enterManualMode() {
-  inManualMode = true;
-  manualOffset = getEncoderAngle(ENCODER_STEERING_WHEEL_PIN);
-}
-
-void exitManualMode() {
-  inManualMode = false;
-}
-
 
 void handleSerial() {
   /*
-    This function is how the rasberry PI is going to communicate with the nano to avoid using a USB port 
-    Intead this looks for data coming in on the RX0 pin
+    This function is how the rasberry PI is going to communicate with the nano
+    to avoid using a USB port.
+    Instead this looks for data coming in on the RX0 pin.
 
     Usage:
       "S:" - This sets the servo position
         Example command sent from the PI: "01:S:0\n"
                                           "01:S:50\n"
                                           "01:S:100\n"
-      "T" -  This toggles manual mode 
+      "T" -  This toggles manual mode
         Example command sent from the PI: "01:T\n"
-      "M:" -  This sets manual mode 
-        Example command sent from the PI: "01:M:1\n" (enter manaul mode)
+      "M:" -  This sets manual mode
+        Example command sent from the PI: "01:M:1\n" (enter manual mode)
                                           "01:M:0\n" (exit manual mode)
       "E" - This sets steering into emergency mode
-        Example Command sent from the PI: "01:E\n"
+        Example command sent from the PI: "01:E\n"
   */
 
   if (!Serial.available()) return;
 
-  String cmd = Serial.readStringUntil('\n'); // read the command until its end
+  String cmd = Serial.readStringUntil('\n');
   cmd.trim();
 
-  // Check to make sure the command was meant for this adruino
-  if (!(cmd.startsWith(String(ALL_ADDRESS)) || cmd.startsWith(String(LOCAL_ADDRESS))))
-  {
+  // Check to make sure the command was meant for this Arduino
+  if (!(cmd.startsWith(String(ALL_ADDRESS)) || cmd.startsWith(String(LOCAL_ADDRESS)))) {
     return;
   }
 
   // Remove the address + separator
   int sepIndex = cmd.indexOf(':');
-  if (sepIndex != -1) 
-  {
+  if (sepIndex != -1) {
     cmd = cmd.substring(sepIndex + 1);
   }
 
-  // Remove case senstivity
+  // Remove case sensitivity
   cmd.toUpperCase();
 
-  // Proccess the command
-  if (cmd.startsWith("S:")) 
-  {
-    // Seperate the numbers from the percent
-    int sepIndex = cmd.indexOf(':');
-    if (sepIndex != -1) 
-    {
-        cmd = cmd.substring(sepIndex + 1);
+  // Process the command
+  if (cmd.startsWith("S:")) {
+    // Separate the numbers from the percent
+    int ValueSepIndex = cmd.indexOf(':');
+    if (ValueSepIndex != -1) {
+      cmd = cmd.substring(ValueSepIndex + 1);
     }
 
-    // throttle commands only work in AUTO mode
     int percent = cmd.toInt();
 
     // toInt() returns 0 for non-numeric, so verify input is "0"
-    if (percent == 0 && cmd != "0")
-    {
-        Serial.println("ERR:UNKNOWN");
-    }
-    else 
-    {
+    if (percent == 0 && cmd != "0") {
+      Serial.println("1:ERR:UNKNOWN");
+    } else {
       driveServo(percent);
+
+      // Confirm command received
+      Serial.print("1:ACK:S:");
+      Serial.println(percent);
+      Serial.print(":US:");
+      Serial.println(percentToPulseUs(percent));
     }
   }
   else if (cmd == "T") {
     toggleManualMode();
+
+    Serial.println("1:ACK:T");
+    Serial.println(inManualMode ? 1 : 0);
   }
   else if (cmd.startsWith("M:")) {
     bool setManual = (cmd.substring(2).toInt() == 1);
     setManualMode(setManual);
+
+    Serial.print("1:ACK:M:");
+    Serial.println(setManual ? 1 : 0);
   }
   else if (cmd == "E") {
     setManualMode(true);
+    centerServo();
+
+    Serial.println("1:ACK:E");
+  }
+
+  else if (cmd == "C") {
+    centerServo();
+    Serial.print("1:ACK:C:US:");
+    Serial.println(SERVO_CENTER_US);
+  }
+  else {
+    Serial.println("1:ERR:UNKNOWN");
   }
 }
