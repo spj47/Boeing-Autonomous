@@ -68,7 +68,7 @@ long errorCounter = 0;
 int lastBoundValue;
 
 void setup() {
-  servo.attach(SERVO_PIN, LOWER_BOUND, UPPER_BOUND);
+  servo.attach(SERVO_PIN, LOWER_BOUND, HIGHER_BOUND);
 
   pinMode(SERVO_PIN, OUTPUT);
   pinMode(ENCODER_STEERING_WHEEL_PIN, INPUT);
@@ -81,6 +81,11 @@ void setup() {
   }
 
   Serial.begin(BAUD_RATE);
+}
+
+void InitCalibration()
+{
+  calibrationState = -1;
 }
 
 void loop() {
@@ -173,7 +178,7 @@ void CalibrateSystem()
       if (currentCalibrationSteps > CALIBRATION_STEPS)
       {
         lowerAngleBound = c1;
-        servo.writeMicroseconds(UPPER_BOUND);
+        servo.writeMicroseconds(HIGHER_BOUND);
         currentCalibrationSteps = 0;
         calibrationState++;
       }
@@ -195,7 +200,6 @@ void CalibrateSystem()
         upperAngleBound = c1;
         angleBoundDiff = upperAngleBound - lowerAngleBound;
         calibrationState++;
-        centerBound = angleBoundDiff * MIDPOINTPERCENT + lowerAngleBound;
         driveServo(50); // Go to middle when done
       }
       break;
