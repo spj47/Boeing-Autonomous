@@ -2,6 +2,7 @@
 
 // Encoder Pins
 const int ENCODER_STEERING_WHEEL_PIN  = A0;
+const int ENCODER_STEERING_COLUMN_PIN  = A1;
 
 // Servo data
 Servo servo;
@@ -35,19 +36,60 @@ const byte ALL_ADDRESS   = 0x00;
 const byte LOCAL_ADDRESS = 0x01;
 const int BAUD_RATE      = 9600;
 
+// Error Handling
+const byte NO_ERROR = 00;
+const byte COLUMN_DEVIATION = 01; // column deviated beyond what motor is reporting
+
+byte currentErrorCode = NO_ERROR;
+
 // Debug
 const bool IS_DEBUG = false;
 float debugTimer = 0;
 float debugTime  = 1000;
 
+// Auto-Calibration
+int calibrationState = -1; // -1 Uncalibrated | 0 Calibrating Lower Bound | 1 Calibrating Upper Bound | 2 Calibrated
+
+int upperAngleBound;
+int lowerAngleBound;
+int centerBound;
+int angleBoundDiff;
+
+long currentCalibrationSteps;
+const long CALIBRATION_STEPS = 20000;
+const int CALIBRATION_BUFFER = 5;
+const long CALIBRATION_SETTLE_TIME = 5000;
+
+const int ERROR_BUFFER = 20;
+const long ERROR_COUNT = 20000;
+long errorCounter = 0;
+
+// Calibration Meta Data
+int lastBoundValue;
+
 void setup() {
-  servo.attach(SERVO_PIN, LOWER_BOUND, HIGHER_BOUND);
-  servo.writeMicroseconds(currentPos);
+  servo.attach(SERVO_PIN, LOWER_BOUND, UPPER_BOUND);
+
+  pinMode(SERVO_PIN, OUTPUT);
+  pinMode(ENCODER_STEERING_WHEEL_PIN, INPUT);
+  pinMode(ENCODER_STEERING_COLUMN_PIN, INPUT);
+
+  InitCalibration();
+  if (inManualMode)
+  {
+    enterManualMode();
+  }
 
   Serial.begin(BAUD_RATE);
 }
 
 void loop() {
+  if (calibrationState != 2)
+  {
+    CalibrateSystem();
+    return;
+  }
+
   if (inManualMode)
   {
     int angle = getEncoderAngle(ENCODER_STEERING_WHEEL_PIN);
@@ -60,12 +102,104 @@ void loop() {
   }
 
   handleSerial();
+
+  if (checkInvalidAngle())
+  {
+    currentErrorCode = COLUMN_DEVIATION;
+  }
+
+  if (currentErrorCode != NO_ERROR)
+  {
+    return;
+  }
+
   updateServo();
+}
+
+bool checkInvalidAngle()
+{
+  // Get column pulse
+  int columnAngle = getEncoderAngle(ENCODER_STEERING_COLUMN_PIN);
+  int rawColumnPercent = columnAngle - lowerAngleBound / (upperAngleBound - lowerAngleBound);
+  int curvedPulsePercent = percentToPulseUs(rawColumnPercent);
+
+  // Get difference between target
+  int errDeviation = curvedPulsePercent - targetPos;
+  if (errDeviation < 0) errDeviation *= -1;
+
+  bool isError = errDeviation > ERROR_BUFFER;
+  if (isError)
+  {
+    errorCounter++;
+  }
+  else
+  {
+    errorCounter = 0;
+  }
+
+  return (errorCounter > ERROR_COUNT);
 }
 
 int angleToServo(int angle)
 {
   return map(angle, 0, 360, LOWER_BOUND, HIGHER_BOUND);
+}
+
+void CalibrateSystem()
+{
+  // Get the new Value
+  int c1 = getEncoderAngle(ENCODER_STEERING_COLUMN_PIN);
+  switch (calibrationState)
+  {
+    case (-1): 
+      servo.writeMicroseconds(LOWER_BOUND);
+      currentCalibrationSteps = 0;
+      lastBoundValue = c1;
+      calibrationState++;
+      break;
+    case (0): 
+      // Check if it is within buffer
+      if (abs(lastBoundValue - c1) < CALIBRATION_BUFFER)
+      {
+        currentCalibrationSteps++;
+      }
+      else 
+      {
+        lastBoundValue = c1;
+        currentCalibrationSteps = 0;
+      }
+
+      // Set calibrated Values
+      if (currentCalibrationSteps > CALIBRATION_STEPS)
+      {
+        lowerAngleBound = c1;
+        servo.writeMicroseconds(UPPER_BOUND);
+        currentCalibrationSteps = 0;
+        calibrationState++;
+      }
+      break;
+    case (1): 
+      // Check if it is within buffer
+      if (abs(lastBoundValue - c1) < CALIBRATION_BUFFER)
+      {
+        currentCalibrationSteps++;
+      }
+      else 
+      {
+        lastBoundValue = c1;
+        currentCalibrationSteps = 0;
+      }
+      // Set calibrated Values
+      if (currentCalibrationSteps > CALIBRATION_STEPS)
+      {
+        upperAngleBound = c1;
+        angleBoundDiff = upperAngleBound - lowerAngleBound;
+        calibrationState++;
+        centerBound = angleBoundDiff * MIDPOINTPERCENT + lowerAngleBound;
+        driveServo(50); // Go to middle when done
+      }
+      break;
+  }
 }
 
 bool isLoop(int value)
@@ -109,10 +243,6 @@ void updateServo() {
   servo.writeMicroseconds(currentPos);
 }
 
-// Convert a 0 to 100 steering percent into a calibrated pulse width
-// 0 = full left
-// 50 = straight
-// 100 = full right
 int percentToPulseUs(int percent) {
   percent = constrain(percent, 0, 100);
 
@@ -124,6 +254,7 @@ int percentToPulseUs(int percent) {
 }
 
 // ===== PUBLIC API =====
+
 void driveServo(int percent) {
   /*
     This function is used to drive the servo motor from an external master by converting
