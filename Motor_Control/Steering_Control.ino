@@ -124,7 +124,6 @@ int percentToPulseUs(int percent) {
 }
 
 // ===== PUBLIC API =====
-
 void driveServo(int percent) {
   /*
     This function is used to drive the servo motor from an external master by converting
