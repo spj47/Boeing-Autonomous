@@ -7,6 +7,7 @@ const int ENCODER_STEERING_COLUMN_PIN  = A1;
 // Servo data
 Servo servo;
 const int SERVO_PIN = 9;
+const int MANUALBUTTON = 10;
 
 // Motion handling (Both of these combined determine how quickly the servo moves)
 const int STEP_SIZE_US  = 5;
@@ -73,6 +74,7 @@ void setup() {
   pinMode(SERVO_PIN, OUTPUT);
   pinMode(ENCODER_STEERING_WHEEL_PIN, INPUT);
   pinMode(ENCODER_STEERING_COLUMN_PIN, INPUT);
+  pinMode(MANUALBUTTON, INPUT);
 
   InitCalibration();
   if (inManualMode)
@@ -386,6 +388,10 @@ void handleSerial() {
     centerServo();
     Serial.print("1:ACK:C:US:");
     Serial.println(SERVO_CENTER_US);
+  }
+  else if (cmd == "D")
+  {
+    Serial.println(digitalRead(MANUALBUTTON));
   }
   else {
     Serial.println("1:ERR:UNKNOWN");
