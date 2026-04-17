@@ -394,16 +394,16 @@ void disableMotor() {
 // move stepper to the given throttle percentage (0-100)
 void moveToThrottle(int percent) {
   percent = constrain(percent, 0, 100);
-  long currentPos = stepper.currentPosition();
-  currentPos += percent > currentPercentTarget ? MORE_THROTTLE : LESS_THROTTLE;
+
+  long targetSteps = map(percent, 0, 100, 0, 6400);
 
   currentThrottle = percent;
   currentPercentTarget = percent;
-  isMoving = true;  
+  isMoving = true;
   correctCheckCount = 0;
 
   enableMotor();
-  stepper.moveTo(currentPos);
+  stepper.moveTo(targetSteps);
 }
 
 // calibrate: set current position as idle (0%)
